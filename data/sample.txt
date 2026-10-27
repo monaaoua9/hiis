@@ -1,0 +1,12 @@
+﻿The quick brown fox jumps over the lazy dog
+A fast brown dog outpaces a quick fox
+Inverted indexes map every term to the documents containing it
+Posting lists are compressed with frame of reference encoding
+BM25 ranks documents by term frequency and inverse document frequency
+Segment merging rewrites many small segments into one large segment
+The lazy cat sleeps all day while the dog barks
+Phrase queries need term positions stored in the posting lists
+Variable byte encoding stores small integers in a single byte
+Immutable segments make concurrent readers lock free
+البحث النصي الكامل يعتمد على الفهرس المعكوس وقوائم النشر
+يتم ضغط قوائم النشر لتقليل حجم القراءة من القرص

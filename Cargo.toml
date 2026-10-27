@@ -1,0 +1,23 @@
+﻿[package]
+name = "hiis"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Segment-based full-text search storage engine: inverted index, FoR/VByte compression, BM25"
+license = "MIT"
+
+[lib]
+name = "hiis"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hiis"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
