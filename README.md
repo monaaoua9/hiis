@@ -42,7 +42,7 @@ cargo run --release -- stats  ./idx
 ## Test and measure
 
 ```
-cargo test                                   # 59 unit + 20 integration + 1 disk-backed + 8 robustness + doctest
+cargo test                                   # 63 unit + 20 integration + 1 disk-backed + 8 robustness + doctest
 cargo run --release --example bench -- 100000 [threads]
 ```
 
@@ -86,14 +86,15 @@ between runs:
 
 | collection | engine | index time | docs/s | on disk | nDCG@10 | query p50 / p95 |
 |---|---|---|---|---|---|---|
-| SciFact, 5k docs | hiis | 0.7 s | 7,600 | 10 MB | 0.6827 | 0.23 / 0.60 ms |
-| | tantivy | 1.2 s | 4,400 | 22 MB | 0.6863 | 0.46 / 1.06 ms |
-| TREC-COVID, 171k docs, 192 MB | hiis | 17.8 s | 9,600 | 246 MB | 0.5798 | 2.7 / 7.9 ms |
-| | tantivy | 10.5 s | 16,400 | 170 MB | 0.5794 | 3.0 / 8.7 ms |
+| SciFact, 5k docs | hiis | 0.5 s | 10,500 | 7.7 MB | 0.6827 | 0.47 / 0.75 ms |
+| | tantivy | 1.0 s | 5,100 | 22 MB | 0.6863 | 0.40 / 0.93 ms |
+| TREC-COVID, 171k docs, 192 MB | hiis | 18.8 s | 9,100 | 181 MB | 0.5798 | 2.5 / 8.3 ms |
+| | tantivy | 9.0 s | 19,100 | 170 MB | 0.5796 | 2.5 / 7.1 ms |
 
-Ranking quality is the same. Queries are on par. Tantivy still indexes about
-1.7x faster on the large set and its index is smaller, since it compresses the
-stored text and hiis keeps it raw.
+Ranking quality is the same, queries are on par, and index sizes are within
+about 7% of each other (both compress the stored text). Tantivy still indexes
+about twice as fast on the large set. The query timings include fetching the
+top 10 stored documents.
 
 ```
 cd bench-compare && cargo run --release -- path/to/trec-covid 8

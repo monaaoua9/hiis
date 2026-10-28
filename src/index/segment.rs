@@ -4,8 +4,10 @@
 //! header    8B   "HIIS" | version u32
 //! postings       concatenated per-term posting lists
 //! terms          sorted: len, utf8, doc_freq, total_tf, off, len   (vbyte fields)
-//! docs           per doc: ext_id, token_len, text_off, text_len    (vbyte fields)
-//! store          raw document text
+//! store          document text, cut into 8 KiB blocks and LZ-compressed
+//! docs           per doc: ext_id, token_len, text_off, text_len    (vbyte fields;
+//!                offsets are into the uncompressed text stream), then the block
+//!                table: total_len, n_blocks, compressed length of each block
 //! footer   48B   n_docs u32 | n_terms u32 | 4 x u64 section offsets | crc32 of everything before | "SIIH"
 //! ```
 //!
@@ -24,16 +26,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
 
-use crate::codec::{crc32, vbyte};
+use crate::codec::{crc32, lz, vbyte};
 use crate::error::{Error, Result};
 use crate::index::postings::{EncodedPostings, PostingsCursor};
 use crate::index::DocId;
 
 const MAGIC: &[u8; 4] = b"HIIS";
 const END_MAGIC: &[u8; 4] = b"SIIH";
-const VERSION: u32 = 3; // 3: counts moved to the footer; 2: per-block max_tf in posting skip tables
+const VERSION: u32 = 4; // 4: compressed text store; 3: counts in the footer; 2: per-block max_tf
 const HEADER_LEN: usize = 8;
 const FOOTER_LEN: usize = 48;
+const BLOCK: usize = 8 << 10;
 
 pub fn seg_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("seg_{id:08}.hiis"))
@@ -129,26 +132,59 @@ impl SegmentWriter {
             vbyte::write_u64(&mut out, t.len as u64);
         }
 
-        let docs_off = out.len() as u64;
-        for d in &self.docs {
-            vbyte::write_u64(&mut out, d.ext_id);
-            vbyte::write_u32(&mut out, d.len);
-            vbyte::write_u64(&mut out, d.text_off);
-            vbyte::write_u32(&mut out, d.text_len);
+        let store_off = out.len() as u64;
+        let mut clens = Vec::new();
+        for chunk in self.store.chunks(BLOCK) {
+            let before = out.len();
+            lz::compress(chunk, &mut out);
+            clens.push((out.len() - before) as u32);
         }
 
-        let store_off = out.len() as u64;
-        out.extend_from_slice(&self.store);
+        let docs_off = out.len() as u64;
+        let table = self.docs.iter().map(|d| (d.ext_id, d.len, d.text_off, d.text_len));
+        write_doc_table(&mut out, table, self.store.len() as u64, &clens);
 
         out.extend_from_slice(&(self.docs.len() as u32).to_le_bytes());
         out.extend_from_slice(&(self.terms.len() as u32).to_le_bytes());
-        for off in [post_off, terms_off, docs_off, store_off] {
+        for off in [post_off, terms_off, store_off, docs_off] {
             out.extend_from_slice(&off.to_le_bytes());
         }
         let crc = crc32::checksum(&out);
         out.extend_from_slice(&crc.to_le_bytes());
         out.extend_from_slice(END_MAGIC);
         out
+    }
+}
+
+fn write_doc_table(
+    out: &mut Vec<u8>,
+    docs: impl Iterator<Item = (DocId, u32, u64, u32)>,
+    total_len: u64,
+    clens: &[u32],
+) {
+    for (ext_id, len, text_off, text_len) in docs {
+        vbyte::write_u64(out, ext_id);
+        vbyte::write_u32(out, len);
+        vbyte::write_u64(out, text_off);
+        vbyte::write_u32(out, text_len);
+    }
+    vbyte::write_u64(out, total_len);
+    vbyte::write_u32(out, clens.len() as u32);
+    for &c in clens {
+        vbyte::write_u32(out, c);
+    }
+}
+
+// remembers the last decompressed block; merges read docs in order, so
+// neighbours share it
+pub(crate) struct BlockCache {
+    idx: usize,
+    data: Vec<u8>,
+}
+
+impl Default for BlockCache {
+    fn default() -> Self {
+        BlockCache { idx: usize::MAX, data: Vec::new() }
     }
 }
 
@@ -224,6 +260,9 @@ pub struct Segment {
     size: usize,
     post_off: usize,
     store_off: usize,
+    // (start relative to store_off, compressed length) per text block
+    blocks: Vec<(usize, usize)>,
+    store_len: usize,
     terms: Vec<TermEntry>,
     docs: Vec<DocEntry>,
     by_ext: HashMap<DocId, u32>,
@@ -270,23 +309,22 @@ impl Segment {
         let n_terms = rd_u32(&foot, 4) as usize;
         let post_off = rd_u64(&foot, 8) as usize;
         let terms_off = rd_u64(&foot, 16) as usize;
-        let docs_off = rd_u64(&foot, 24) as usize;
-        let store_off = rd_u64(&foot, 32) as usize;
+        let store_off = rd_u64(&foot, 24) as usize;
+        let docs_off = rd_u64(&foot, 32) as usize;
         if !(HEADER_LEN <= post_off
             && post_off <= terms_off
-            && terms_off <= docs_off
-            && docs_off <= store_off
-            && store_off <= foot_at)
+            && terms_off <= store_off
+            && store_off <= docs_off
+            && docs_off <= foot_at)
         {
             return Err(Error::Corrupt("segment section offsets"));
         }
 
         let post_len = terms_off - post_off;
-        let store_len = foot_at - store_off;
 
         // the term dictionary and doc table are always resident; only
         // postings and stored text can stay on disk
-        let tsec = backing.read(terms_off, docs_off - terms_off)?;
+        let tsec = backing.read(terms_off, store_off - terms_off)?;
         let mut terms = Vec::with_capacity(n_terms.min(tsec.len()));
         let mut p = 0;
         for _ in 0..n_terms {
@@ -308,16 +346,37 @@ impl Segment {
         }
         drop(tsec);
 
-        let dsec = backing.read(docs_off, store_off - docs_off)?;
-        let mut docs = Vec::with_capacity(n_docs.min(dsec.len()));
-        let mut by_ext = HashMap::with_capacity(n_docs.min(dsec.len()));
+        let dsec = backing.read(docs_off, foot_at - docs_off)?;
+        let mut raw_docs = Vec::with_capacity(n_docs.min(dsec.len()));
         let mut p = 0;
-        let mut total_len = 0u64;
-        for i in 0..n_docs {
+        for _ in 0..n_docs {
             let ext_id = vbyte::read_u64(&dsec, &mut p)?;
             let len = vbyte::read_u32(&dsec, &mut p)?;
             let text_off = vbyte::read_u64(&dsec, &mut p)?;
             let text_len = vbyte::read_u32(&dsec, &mut p)?;
+            raw_docs.push((ext_id, len, text_off, text_len));
+        }
+        let store_len = vbyte::read_u64(&dsec, &mut p)? as usize;
+        let n_blocks = vbyte::read_u32(&dsec, &mut p)? as usize;
+        if n_blocks != store_len.div_ceil(BLOCK) {
+            return Err(Error::Corrupt("text block count mismatch"));
+        }
+        let mut blocks = Vec::with_capacity(n_blocks.min(dsec.len()));
+        let mut at = 0usize;
+        for _ in 0..n_blocks {
+            let clen = vbyte::read_u32(&dsec, &mut p)? as usize;
+            blocks.push((at, clen));
+            at = at.checked_add(clen).ok_or(Error::Corrupt("text block table overflow"))?;
+        }
+        if at != docs_off - store_off {
+            return Err(Error::Corrupt("text block table disagrees with store size"));
+        }
+        drop(dsec);
+
+        let mut docs = Vec::with_capacity(raw_docs.len());
+        let mut by_ext = HashMap::with_capacity(raw_docs.len());
+        let mut total_len = 0u64;
+        for (i, (ext_id, len, text_off, text_len)) in raw_docs.into_iter().enumerate() {
             if text_off.checked_add(text_len as u64).is_none_or(|e| e > store_len as u64) {
                 return Err(Error::Corrupt("doc text out of range"));
             }
@@ -325,7 +384,6 @@ impl Segment {
             by_ext.insert(ext_id, i as u32);
             docs.push(DocEntry { ext_id, len, text_off, text_len });
         }
-        drop(dsec);
 
         Ok(Segment {
             id,
@@ -333,6 +391,8 @@ impl Segment {
             size,
             post_off,
             store_off,
+            blocks,
+            store_len,
             terms,
             docs,
             by_ext,
@@ -471,12 +531,31 @@ impl Segment {
     }
 
     pub fn text(&self, local: u32) -> Option<String> {
-        String::from_utf8(self.text_bytes(local).ok()?.into_owned()).ok()
+        String::from_utf8(self.text_bytes(local).ok()?).ok()
     }
 
-    pub(crate) fn text_bytes(&self, local: u32) -> Result<Cow<'_, [u8]>> {
+    pub(crate) fn text_bytes(&self, local: u32) -> Result<Vec<u8>> {
+        self.text_bytes_with(local, &mut BlockCache::default())
+    }
+
+    pub(crate) fn text_bytes_with(&self, local: u32, cache: &mut BlockCache) -> Result<Vec<u8>> {
         let d = &self.docs[local as usize];
-        self.backing.read(self.store_off + d.text_off as usize, d.text_len as usize)
+        let (end, mut at) = ((d.text_off + d.text_len as u64) as usize, d.text_off as usize);
+        let mut out = Vec::with_capacity((d.text_len as usize).min(1 << 20));
+        while at < end {
+            let b = at / BLOCK;
+            if cache.idx != b {
+                let (off, clen) = self.blocks[b];
+                let raw = self.backing.read(self.store_off + off, clen)?;
+                cache.data = lz::decompress(&raw, BLOCK.min(self.store_len - b * BLOCK))?;
+                cache.idx = b;
+            }
+            let from = at - b * BLOCK;
+            let take = (cache.data.len() - from).min(end - at);
+            out.extend_from_slice(&cache.data[from..from + take]);
+            at += take;
+        }
+        Ok(out)
     }
 
     pub fn terms(&self) -> &[TermEntry] {
@@ -534,6 +613,13 @@ impl StreamWriter {
         Ok(())
     }
 
+    fn put_block(&mut self, chunk: &[u8], clens: &mut Vec<u32>) -> Result<()> {
+        let mut c = Vec::with_capacity(chunk.len() / 2);
+        lz::compress(chunk, &mut c);
+        clens.push(c.len() as u32);
+        self.put(&c)
+    }
+
     /// Same ordering rule as `SegmentWriter::add_term`.
     pub fn add_term(&mut self, term: &str, p: EncodedPostings) -> Result<()> {
         self.terms.push(TermEntry {
@@ -567,31 +653,41 @@ impl StreamWriter {
         }
         self.put(&sec)?;
 
-        let docs_off = self.pos;
-        let mut sec = Vec::new();
-        let mut text_off = 0u64;
-        for &(ext_id, len, text_len) in docs {
-            vbyte::write_u64(&mut sec, ext_id);
-            vbyte::write_u32(&mut sec, len);
-            vbyte::write_u64(&mut sec, text_off);
-            vbyte::write_u32(&mut sec, text_len);
-            text_off += text_len as u64;
-        }
-        self.put(&sec)?;
-
         let store_off = self.pos;
+        let mut clens = Vec::new();
+        let mut pending: Vec<u8> = Vec::new();
+        let mut total = 0u64;
         for (i, &(_, _, text_len)) in docs.iter().enumerate() {
             let bytes = text(i)?;
             if bytes.len() != text_len as usize {
                 return Err(Error::Corrupt("stored text length changed during merge"));
             }
-            self.put(&bytes)?;
+            total += text_len as u64;
+            pending.extend_from_slice(&bytes);
+            while pending.len() >= BLOCK {
+                self.put_block(&pending[..BLOCK], &mut clens)?;
+                pending.drain(..BLOCK);
+            }
         }
+        if !pending.is_empty() {
+            self.put_block(&pending, &mut clens)?;
+        }
+
+        let docs_off = self.pos;
+        let mut sec = Vec::new();
+        let mut text_off = 0u64;
+        let table = docs.iter().map(|&(ext_id, len, text_len)| {
+            let at = text_off;
+            text_off += text_len as u64;
+            (ext_id, len, at, text_len)
+        });
+        write_doc_table(&mut sec, table, total, &clens);
+        self.put(&sec)?;
 
         let mut foot = Vec::with_capacity(FOOTER_LEN);
         foot.extend_from_slice(&(docs.len() as u32).to_le_bytes());
         foot.extend_from_slice(&n_terms.to_le_bytes());
-        for off in [self.post_off, terms_off, docs_off, store_off] {
+        for off in [self.post_off, terms_off, store_off, docs_off] {
             foot.extend_from_slice(&off.to_le_bytes());
         }
         self.put(&foot)?;

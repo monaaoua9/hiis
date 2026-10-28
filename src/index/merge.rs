@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::index::postings::PostingsWriter;
-use crate::index::segment::{bit_set, Segment, StreamWriter};
+use crate::index::segment::{bit_set, BlockCache, Segment, StreamWriter};
 
 /// Tiered policy: bucket segments by size (log base `factor`), and when a
 /// bucket gets `factor` members, merge them. Small segments get merged often
@@ -134,9 +134,10 @@ pub fn merge_segments(sources: &[Arc<Segment>], deleted: &[Vec<u64>], out: &Path
         }
     }
 
+    let mut caches: Vec<BlockCache> = sources.iter().map(|_| BlockCache::default()).collect();
     w.finish(&docs, |i| {
         let (si, local) = survivors[i];
-        Ok(sources[si].text_bytes(local)?.into_owned())
+        sources[si].text_bytes_with(local, &mut caches[si])
     })
 }
 

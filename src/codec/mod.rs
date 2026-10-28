@@ -8,4 +8,5 @@
 
 pub mod bitpack;
 pub mod crc32;
+pub mod lz;
 pub mod vbyte;

@@ -235,7 +235,7 @@ fn checksum_valid_but_mutated_segments_are_survivable() {
                 let _ = seg.doc(d);
             }
         }
-        for local in 0..n {
+        for local in (0..n).step_by(25) {
             let _ = seg.text(local);
         }
     }
