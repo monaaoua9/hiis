@@ -157,7 +157,7 @@ impl Engine {
         let (wal, replayed) = Wal::open(&dir.join(WAL), cfg.wal_fsync)?;
         let mut builder = SegmentBuilder::default();
         for (id, text) in replayed.into_iter().filter(|r| r.0 >= flushed_upto) {
-            builder.add(id, &text, &analyzer.analyze(&text));
+            builder.add(id, &text, SegmentBuilder::group(analyzer.analyze(&text)));
             next_doc = next_doc.max(id + 1);
         }
 
@@ -191,14 +191,14 @@ impl Engine {
     }
 
     pub fn add_document(&self, text: &str) -> Result<DocId> {
-        let tokens = self.shared.analyzer.analyze(text);
+        let grouped = SegmentBuilder::group(self.shared.analyzer.analyze(text));
 
         let mut buf = self.shared.buffer.lock().unwrap();
         // id is taken under the buffer lock: flush relies on "every id below
         // next_doc is already in this buffer or in a segment"
         let id = self.shared.next_doc.fetch_add(1, Ordering::Relaxed);
         self.shared.wal.lock().unwrap().append(id, text)?;
-        buf.add(id, text, &tokens);
+        buf.add(id, text, grouped);
         let c = &self.shared.cfg;
         if buf.len() >= c.flush_docs || buf.ram_bytes() >= c.flush_bytes {
             self.shared.flush(&mut buf)?;

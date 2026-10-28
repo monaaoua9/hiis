@@ -1,4 +1,4 @@
-//! cargo run --release --example bench -- [n_docs]
+//! cargo run --release --example bench -- [n_docs] [threads]
 //!
 //! Synthetic skewed corpus: not a substitute for a real dataset, but enough
 //! to see indexing rate, on-disk size vs raw text, and query latency.
@@ -25,23 +25,35 @@ fn main() -> hiis::Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
 
     let vocab: Vec<String> = (0..20_000).map(|i| format!("w{}x{}", i, i % 97)).collect();
-    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let threads: usize = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(1);
     let engine = Engine::open(&dir, Config { flush_docs: 20_000, ..Config::default() })?;
 
-    let mut raw = 0usize;
     let t = Instant::now();
-    for _ in 0..n {
-        let len = 40 + (rng.next() % 80) as usize;
-        let mut doc = String::new();
-        for _ in 0..len {
-            // cubing a uniform sample skews picks toward low ranks
-            let u = (rng.next() % 1_000_000) as f64 / 1_000_000.0;
-            doc.push_str(&vocab[(u * u * u * vocab.len() as f64) as usize]);
-            doc.push(' ');
-        }
-        raw += doc.len();
-        engine.add_document(&doc)?;
-    }
+    let raw: usize = std::thread::scope(|sc| {
+        let jobs: Vec<_> = (0..threads)
+            .map(|th| {
+                let (engine, vocab) = (&engine, &vocab);
+                sc.spawn(move || -> hiis::Result<usize> {
+                    let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ ((th as u64 + 1) * 0x1234_5678_9ABC));
+                    let mut raw = 0;
+                    for _ in 0..n / threads {
+                        let len = 40 + (rng.next() % 80) as usize;
+                        let mut doc = String::new();
+                        for _ in 0..len {
+                            // cubing a uniform sample skews picks toward low ranks
+                            let u = (rng.next() % 1_000_000) as f64 / 1_000_000.0;
+                            doc.push_str(&vocab[(u * u * u * vocab.len() as f64) as usize]);
+                            doc.push(' ');
+                        }
+                        raw += doc.len();
+                        engine.add_document(&doc)?;
+                    }
+                    Ok(raw)
+                })
+            })
+            .collect();
+        jobs.into_iter().map(|j| j.join().unwrap()).sum::<hiis::Result<usize>>()
+    })?;
     engine.commit()?;
     let secs = t.elapsed().as_secs_f64();
     println!(

@@ -30,6 +30,13 @@ impl Hasher for Fx {
     }
 }
 
+pub struct Grouped {
+    n_tokens: u32,
+    // sorted by term; positions are flat, `freq` of them per term, ascending
+    terms: Vec<(String, u32)>,
+    positions: Vec<u32>,
+}
+
 /// The mutable in-memory segment. Everything lands here first and is turned
 /// into an immutable on-disk segment by `build`.
 #[derive(Default)]
@@ -40,38 +47,51 @@ pub struct SegmentBuilder {
 }
 
 impl SegmentBuilder {
-    pub fn add(&mut self, id: DocId, text: &str, tokens: &[Token]) {
-        let local = self.docs.len() as u32;
-
-        // group by term without a per-doc map: sort token indices by (term, position)
+    // the sort-and-group half of indexing a doc; needs no builder state, so
+    // callers do it before taking the buffer lock
+    pub fn group(tokens: Vec<Token>) -> Grouped {
+        let n_tokens = tokens.len() as u32;
         let mut order: Vec<usize> = (0..tokens.len()).collect();
         order.sort_unstable_by(|&a, &b| {
             tokens[a].term.cmp(&tokens[b].term).then(tokens[a].position.cmp(&tokens[b].position))
         });
 
-        let mut i = 0;
-        while i < order.len() {
-            let term = tokens[order[i]].term.as_str();
-            let mut j = i;
-            while j < order.len() && tokens[order[j]].term == term {
-                j += 1;
+        let mut terms: Vec<(String, u32)> = Vec::new();
+        let mut positions = Vec::with_capacity(tokens.len());
+        let mut tokens: Vec<Option<Token>> = tokens.into_iter().map(Some).collect();
+        for k in order {
+            let t = tokens[k].take().unwrap();
+            match terms.last_mut() {
+                Some((last, freq)) if *last == t.term => *freq += 1,
+                _ => terms.push((t.term, 1)),
             }
-            let buf = match self.terms.get_mut(term) {
+            positions.push(t.position);
+        }
+        Grouped { n_tokens, terms, positions }
+    }
+
+    pub fn add(&mut self, id: DocId, text: &str, g: Grouped) {
+        let local = self.docs.len() as u32;
+
+        let mut off = 0usize;
+        for (term, freq) in g.terms {
+            let n = freq as usize;
+            let buf = match self.terms.get_mut(term.as_str()) {
                 Some(b) => b,
                 None => {
                     self.ram += term.len() + 64;
-                    self.terms.entry(term.to_string()).or_default()
+                    self.terms.entry(term).or_default()
                 }
             };
             buf.docs.push(local);
-            buf.freqs.push((j - i) as u32);
-            buf.positions.extend(order[i..j].iter().map(|&k| tokens[k].position));
-            self.ram += 8 + (j - i) * 4;
-            i = j;
+            buf.freqs.push(freq);
+            buf.positions.extend_from_slice(&g.positions[off..off + n]);
+            self.ram += 8 + n * 4;
+            off += n;
         }
 
         self.ram += text.len() + 48;
-        self.docs.push((id, tokens.len() as u32, text.to_string()));
+        self.docs.push((id, g.n_tokens, text.to_string()));
     }
     pub fn len(&self) -> usize {
         self.docs.len()
