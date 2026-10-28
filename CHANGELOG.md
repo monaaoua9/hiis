@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* Prefix queries (`compres*`), expanded against the sorted term dictionary of every segment.
+
 ## 0.1.0
 
 * Text analysis: tokenizer, normalization, stopwords, Porter stemmer, Arabic orthographic folding.

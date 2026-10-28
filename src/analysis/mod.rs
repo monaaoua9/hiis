@@ -53,6 +53,13 @@ impl Analyzer {
         out
     }
 
+    // for prefix queries: folded but not stemmed, since the user typed a fragment of a word
+    pub fn fold_prefix(&self, raw: &str) -> Option<String> {
+        let lowered = raw.to_lowercase();
+        let folded: String = lowered.chars().filter_map(fold_char).collect();
+        (!folded.is_empty()).then_some(folded)
+    }
+
     fn normalize(&self, raw: &str) -> Option<String> {
         let lowered = raw.to_lowercase();
         let trimmed =

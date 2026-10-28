@@ -6,6 +6,7 @@
 //! rust -java           must not contain `java`
 //! "inverted index"     exact phrase
 //! +"inverted index" bm25
+//! compres*             any term starting with `compres` (not stemmed, max 256 terms)
 //! ```
 //!
 //! Text is run through the same analyzer as documents, so `Indexing` finds
@@ -23,6 +24,8 @@ pub enum Occur {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Clause {
     Term(String),
+    // matches every indexed term starting with this (already folded, not stemmed)
+    Prefix(String),
     // (term, offset from the first term of the phrase)
     Phrase(Vec<(String, u32)>),
 }
@@ -89,6 +92,12 @@ impl Query {
                     i += 1;
                 }
                 let text: String = chars[s..i].iter().collect();
+                if let Some(stem) = text.strip_suffix('*') {
+                    if let Some(p) = an.fold_prefix(stem) {
+                        clauses.push(QueryClause { occur, clause: Clause::Prefix(p) });
+                        continue;
+                    }
+                }
                 // "wi-fi" analyses to two terms; each gets the same occur
                 for t in an.analyze(&text) {
                     clauses.push(QueryClause { occur, clause: Clause::Term(t.term) });
@@ -103,6 +112,7 @@ impl Query {
         for c in &self.clauses {
             match &c.clause {
                 Clause::Term(t) => out.push(t),
+                Clause::Prefix(_) => {}
                 Clause::Phrase(p) => out.extend(p.iter().map(|x| x.0.as_str())),
             }
         }
@@ -160,6 +170,20 @@ mod tests {
     fn hyphen_inside_word_is_not_negation() {
         let q = parse("wi-fi");
         assert_eq!(q.clauses, [term(Occur::Should, "wi"), term(Occur::Should, "fi")]);
+    }
+
+    #[test]
+    fn prefix_is_folded_not_stemmed() {
+        let q = parse("+Runn* -x*");
+        assert_eq!(
+            q.clauses,
+            [
+                QueryClause { occur: Occur::Must, clause: Clause::Prefix("runn".into()) },
+                QueryClause { occur: Occur::MustNot, clause: Clause::Prefix("x".into()) },
+            ]
+        );
+        // a lone star has nothing to expand, falls through to the normal path
+        assert!(parse("*").clauses.is_empty());
     }
 
     #[test]

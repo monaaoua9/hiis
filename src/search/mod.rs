@@ -47,6 +47,8 @@ struct Ctx {
     bm25: Bm25,
     avg_len: f32,
     idf: HashMap<String, f32>,
+    // prefix -> the indexed terms it stands for (same list for every segment, so idf is consistent)
+    expand: HashMap<String, Vec<String>>,
 }
 
 type Scored = Vec<(u32, f32)>;
@@ -74,12 +76,23 @@ pub fn execute_with(
     }
     let total_len: u64 = segments.iter().map(|s| s.live_token_len()).sum();
 
+    let mut expand = HashMap::new();
+    for c in &q.clauses {
+        if let Clause::Prefix(p) = &c.clause {
+            expand.entry(p.clone()).or_insert_with(|| expand_prefix(segments, p));
+        }
+    }
+
     let mut idf = HashMap::new();
-    for t in q.terms() {
+    let wanted = q.terms().into_iter().chain(expand.values().flatten().map(|s| s.as_str()));
+    for t in wanted {
+        if idf.contains_key(t) {
+            continue;
+        }
         let df: u64 = segments.iter().filter_map(|s| s.term(t)).map(|e| e.doc_freq as u64).sum();
         idf.insert(t.to_string(), Bm25::idf(n_docs, df));
     }
-    let ctx = Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf };
+    let ctx = Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand };
 
     let mut heap: BinaryHeap<Reverse<Hit>> = BinaryHeap::with_capacity(k + 1);
     let disjunction = if prune { pure_disjunction(q) } else { None };
@@ -94,6 +107,29 @@ pub fn execute_with(
         }
     }
     Ok(heap.into_sorted_vec().into_iter().map(|r| r.0).collect())
+}
+
+// a prefix like "a*" would otherwise drag in half the dictionary; first terms in
+// sorted order win, which is arbitrary but at least stable
+const MAX_EXPANSION: usize = 256;
+
+fn expand_prefix(segments: &[Arc<Segment>], prefix: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for seg in segments {
+        let terms = seg.terms();
+        let from = terms.partition_point(|e| e.term.as_str() < prefix);
+        out.extend(
+            terms[from..]
+                .iter()
+                .take_while(|e| e.term.starts_with(prefix))
+                .take(MAX_EXPANSION)
+                .map(|e| e.term.clone()),
+        );
+    }
+    out.sort_unstable();
+    out.dedup();
+    out.truncate(MAX_EXPANSION);
+    out
 }
 
 fn offer(heap: &mut BinaryHeap<Reverse<Hit>>, k: usize, hit: Hit) {
@@ -265,6 +301,13 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
     for qc in &q.clauses {
         let hits = match &qc.clause {
             Clause::Term(t) => eval_term(seg, &dels, t, ctx)?,
+            Clause::Prefix(p) => {
+                let mut lists = Vec::new();
+                for t in &ctx.expand[p] {
+                    lists.push(eval_term(seg, &dels, t, ctx)?);
+                }
+                union(lists)
+            }
             Clause::Phrase(p) => eval_phrase(seg, &dels, p, ctx)?,
         };
         match qc.occur {

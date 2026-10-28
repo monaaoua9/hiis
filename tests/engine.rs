@@ -89,6 +89,24 @@ fn phrase_queries_respect_adjacency() {
 }
 
 #[test]
+fn prefix_queries_expand_over_the_dictionary() {
+    let sorted = |mut v: Vec<u64>| {
+        v.sort();
+        v
+    };
+    for cfg in [Config::default(), small_cfg()] {
+        let (_d, e) = loaded(cfg);
+        // "fo*" covers fox and nothing the stemmer would hide
+        assert_eq!(sorted(ids(&e.search("fo*", 20).unwrap())), sorted(ids(&e.search("fox", 20).unwrap())));
+        assert_eq!(ids(&e.search("compres*", 5).unwrap()), [3]);
+        assert!(e.search("zzz*", 5).unwrap().is_empty());
+        // prefix as MUST / MUST_NOT
+        assert_eq!(ids(&e.search("+compres* +frame", 5).unwrap()), [3]);
+        assert!(!ids(&e.search("quick -fo*", 20).unwrap()).contains(&0));
+    }
+}
+
+#[test]
 fn must_and_must_not() {
     let (_d, e) = loaded(Config::default());
     let mut got = ids(&e.search("+dog +lazy", 10).unwrap());
