@@ -19,6 +19,8 @@
 //! without decoding. `max_tf` per block feeds the score upper bounds used by
 //! MaxScore pruning in `search`.
 
+use std::borrow::Cow;
+
 use crate::codec::bitpack::{self, BLOCK_LEN};
 use crate::codec::vbyte;
 use crate::error::{Error, Result};
@@ -129,7 +131,7 @@ struct BlockInfo {
 const NO_BLOCK: usize = usize::MAX;
 
 pub struct PostingsCursor<'a> {
-    data: &'a [u8],
+    data: Cow<'a, [u8]>,
     n_docs: u32,
     blocks: Vec<BlockInfo>,
     cur_blk: usize,
@@ -139,27 +141,31 @@ pub struct PostingsCursor<'a> {
     freqs: Vec<u32>,
     idx: usize,
 
-    // positions of the loaded block are decoded lazily: pos_off is the byte
-    // offset where the doc at index pos_idx starts
-    pos_bytes: &'a [u8],
+    // positions of the loaded block are decoded lazily: they start at pos_base
+    // in `data`, pos_off is where the doc at index pos_idx starts within them
+    pos_base: usize,
     pos_off: usize,
     pos_idx: usize,
 }
 
 impl<'a> PostingsCursor<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self> {
+        Self::from_cow(Cow::Borrowed(data))
+    }
+
+    pub fn from_cow(data: Cow<'a, [u8]>) -> Result<Self> {
         let mut p = 0;
-        let n_docs = vbyte::read_u32(data, &mut p)?;
-        let n_blocks = vbyte::read_u32(data, &mut p)? as usize;
+        let n_docs = vbyte::read_u32(&data, &mut p)?;
+        let n_blocks = vbyte::read_u32(&data, &mut p)? as usize;
         if n_blocks != (n_docs as usize).div_ceil(BLOCK_LEN) {
             return Err(Error::Corrupt("posting list block count mismatch"));
         }
 
         let mut raw = Vec::with_capacity(n_blocks);
         for _ in 0..n_blocks {
-            let last = vbyte::read_u32(data, &mut p)?;
-            let len = vbyte::read_u32(data, &mut p)? as usize;
-            let max_tf = vbyte::read_u32(data, &mut p)?;
+            let last = vbyte::read_u32(&data, &mut p)?;
+            let len = vbyte::read_u32(&data, &mut p)? as usize;
+            let max_tf = vbyte::read_u32(&data, &mut p)?;
             raw.push((last, len, max_tf));
         }
 
@@ -183,7 +189,7 @@ impl<'a> PostingsCursor<'a> {
             docs: Vec::with_capacity(BLOCK_LEN),
             freqs: Vec::with_capacity(BLOCK_LEN),
             idx: 0,
-            pos_bytes: &[],
+            pos_base: 0,
             pos_off: 0,
             pos_idx: 0,
         })
@@ -259,7 +265,7 @@ impl<'a> PostingsCursor<'a> {
             return Err(Error::Corrupt("posting block disagrees with its skip entry"));
         }
 
-        self.pos_bytes = &blk[p + head_len..];
+        self.pos_base = info.start + p + head_len;
         self.pos_off = 0;
         self.pos_idx = 0;
         self.cur_blk = b;
@@ -323,15 +329,16 @@ impl<'a> PostingsCursor<'a> {
             self.pos_off = 0;
             self.pos_idx = 0;
         }
+        let bytes = &self.data[self.pos_base..];
         while self.pos_idx < self.idx {
             for _ in 0..self.freqs[self.pos_idx] {
-                vbyte::read_u32(self.pos_bytes, &mut self.pos_off)?;
+                vbyte::read_u32(bytes, &mut self.pos_off)?;
             }
             self.pos_idx += 1;
         }
         let mut p = 0u32;
         for _ in 0..self.freqs[self.idx] {
-            p = p.wrapping_add(vbyte::read_u32(self.pos_bytes, &mut self.pos_off)?);
+            p = p.wrapping_add(vbyte::read_u32(bytes, &mut self.pos_off)?);
             out.push(p);
         }
         self.pos_idx += 1;

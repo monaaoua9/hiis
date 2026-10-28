@@ -16,12 +16,37 @@ const TABLE: [u32; 256] = {
     t
 };
 
-pub fn checksum(data: &[u8]) -> u32 {
-    let mut c = !0u32;
-    for &b in data {
-        c = TABLE[((c ^ b as u32) & 0xff) as usize] ^ (c >> 8);
+/// Incremental form, for files too big to hold in one slice.
+pub struct Crc(u32);
+
+impl Crc {
+    pub fn new() -> Self {
+        Crc(!0)
     }
-    !c
+
+    pub fn update(&mut self, data: &[u8]) {
+        let mut c = self.0;
+        for &b in data {
+            c = TABLE[((c ^ b as u32) & 0xff) as usize] ^ (c >> 8);
+        }
+        self.0 = c;
+    }
+
+    pub fn finish(&self) -> u32 {
+        !self.0
+    }
+}
+
+impl Default for Crc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn checksum(data: &[u8]) -> u32 {
+    let mut c = Crc::new();
+    c.update(data);
+    c.finish()
 }
 
 #[cfg(test)]
@@ -30,5 +55,9 @@ mod tests {
     fn known_vector() {
         assert_eq!(super::checksum(b"123456789"), 0xCBF4_3926);
         assert_eq!(super::checksum(b""), 0);
+        let mut c = super::Crc::new();
+        c.update(b"1234");
+        c.update(b"56789");
+        assert_eq!(c.finish(), 0xCBF4_3926);
     }
 }
