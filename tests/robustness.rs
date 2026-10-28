@@ -200,9 +200,9 @@ fn build_segment_bytes(dir: &TmpDir) -> Vec<u8> {
 }
 
 fn fix_crc(bytes: &mut [u8]) {
-    let foot = bytes.len() - 40;
-    let crc = crc32::checksum(&bytes[..foot + 32]);
-    bytes[foot + 32..foot + 36].copy_from_slice(&crc.to_le_bytes());
+    let foot = bytes.len() - 48;
+    let crc = crc32::checksum(&bytes[..foot + 40]);
+    bytes[foot + 40..foot + 44].copy_from_slice(&crc.to_le_bytes());
 }
 
 // A corrupted file whose checksum still validates (bug or malicious input)
@@ -217,7 +217,7 @@ fn checksum_valid_but_mutated_segments_are_survivable() {
     for round in 0..1500 {
         let mut bad = good.clone();
         for _ in 0..1 + r.below(3) {
-            let at = r.below(bad.len() as u64 - 40) as usize;
+            let at = r.below(bad.len() as u64 - 48) as usize;
             bad[at] = r.next() as u8;
         }
         fix_crc(&mut bad);

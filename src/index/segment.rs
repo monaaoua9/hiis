@@ -1,20 +1,25 @@
 //! Immutable on-disk segment.
 //!
 //! ```text
-//! header   16B   "HIIS" | version u32 | n_docs u32 | n_terms u32
+//! header    8B   "HIIS" | version u32
 //! postings       concatenated per-term posting lists
 //! terms          sorted: len, utf8, doc_freq, total_tf, off, len   (vbyte fields)
 //! docs           per doc: ext_id, token_len, text_off, text_len    (vbyte fields)
 //! store          raw document text
-//! footer   40B   4 x u64 section offsets | crc32 of everything before | "SIIH"
+//! footer   48B   n_docs u32 | n_terms u32 | 4 x u64 section offsets | crc32 of everything before | "SIIH"
 //! ```
+//!
+//! The counts live in the footer so a segment can be written in one streaming
+//! pass (merges do that) without going back to patch the header.
 //!
 //! Segments never change after they are written, apart from the side-car
 //! `.del` bitmap that records deleted docs. Deleted docs are physically
 //! dropped the next time their segment takes part in a merge.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -26,9 +31,9 @@ use crate::index::DocId;
 
 const MAGIC: &[u8; 4] = b"HIIS";
 const END_MAGIC: &[u8; 4] = b"SIIH";
-const VERSION: u32 = 2; // 2: per-block max_tf in posting skip tables
-const HEADER_LEN: usize = 16;
-const FOOTER_LEN: usize = 40;
+const VERSION: u32 = 3; // 3: counts moved to the footer; 2: per-block max_tf in posting skip tables
+const HEADER_LEN: usize = 8;
+const FOOTER_LEN: usize = 48;
 
 pub fn seg_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("seg_{id:08}.hiis"))
@@ -56,8 +61,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 pub struct DocEntry {
     pub ext_id: DocId,
     pub len: u32,
-    text_off: u64,
-    text_len: u32,
+    pub(crate) text_off: u64,
+    pub(crate) text_len: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -110,8 +115,6 @@ impl SegmentWriter {
             Vec::with_capacity(HEADER_LEN + self.postings.len() + self.store.len() + FOOTER_LEN + 1024);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&(self.docs.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(self.terms.len() as u32).to_le_bytes());
 
         let post_off = out.len() as u64;
         out.extend_from_slice(&self.postings);
@@ -137,6 +140,8 @@ impl SegmentWriter {
         let store_off = out.len() as u64;
         out.extend_from_slice(&self.store);
 
+        out.extend_from_slice(&(self.docs.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(self.terms.len() as u32).to_le_bytes());
         for off in [post_off, terms_off, docs_off, store_off] {
             out.extend_from_slice(&off.to_le_bytes());
         }
@@ -152,11 +157,73 @@ struct Deleted {
     count: u32,
 }
 
+// resident segments are one Vec; big ones are read on demand with positional
+// reads (mmap would need unsafe), and the OS page cache does the caching
+enum Backing {
+    Mem(Vec<u8>),
+    File(fs::File),
+}
+
+#[cfg(unix)]
+fn read_exact_at(f: &fs::File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(f, buf, off)
+}
+
+#[cfg(windows)]
+fn read_exact_at(f: &fs::File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let n = std::os::windows::fs::FileExt::seek_read(f, &mut buf[done..], off + done as u64)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        done += n;
+    }
+    Ok(())
+}
+
+impl Backing {
+    fn read(&self, off: usize, len: usize) -> Result<Cow<'_, [u8]>> {
+        match self {
+            Backing::Mem(v) => off
+                .checked_add(len)
+                .and_then(|end| v.get(off..end))
+                .map(Cow::Borrowed)
+                .ok_or(Error::Corrupt("read past end of segment")),
+            Backing::File(f) => {
+                let mut buf = vec![0u8; len];
+                read_exact_at(f, &mut buf, off as u64)?;
+                Ok(Cow::Owned(buf))
+            }
+        }
+    }
+
+    // crc of the first `n` bytes
+    fn crc_prefix(&self, n: usize) -> Result<u32> {
+        match self {
+            Backing::Mem(v) => Ok(crc32::checksum(&v[..n])),
+            Backing::File(f) => {
+                let mut crc = crc32::Crc::new();
+                let mut buf = vec![0u8; 1 << 20];
+                let mut at = 0;
+                while at < n {
+                    let take = buf.len().min(n - at);
+                    read_exact_at(f, &mut buf[..take], at as u64)?;
+                    crc.update(&buf[..take]);
+                    at += take;
+                }
+                Ok(crc.finish())
+            }
+        }
+    }
+}
+
 pub struct Segment {
     id: u64,
-    data: Vec<u8>,
-    post_range: (usize, usize),
-    store_range: (usize, usize),
+    backing: Backing,
+    size: usize,
+    post_off: usize,
+    store_off: usize,
     terms: Vec<TermEntry>,
     docs: Vec<DocEntry>,
     by_ext: HashMap<DocId, u32>,
@@ -175,50 +242,62 @@ fn rd_u64(b: &[u8], at: usize) -> u64 {
 
 impl Segment {
     pub fn from_bytes(id: u64, data: Vec<u8>) -> Result<Segment> {
-        if data.len() < HEADER_LEN + FOOTER_LEN {
+        let size = data.len();
+        Segment::load(id, Backing::Mem(data), size)
+    }
+
+    fn load(id: u64, backing: Backing, size: usize) -> Result<Segment> {
+        if size < HEADER_LEN + FOOTER_LEN {
             return Err(Error::Corrupt("segment too short"));
         }
-        if &data[..4] != MAGIC || &data[data.len() - 4..] != END_MAGIC {
+        let head = backing.read(0, HEADER_LEN)?;
+        if &head[..4] != MAGIC {
             return Err(Error::Corrupt("bad segment magic"));
         }
-        if rd_u32(&data, 4) != VERSION {
+        if rd_u32(&head, 4) != VERSION {
             return Err(Error::Corrupt("unsupported segment version"));
         }
-        let foot = data.len() - FOOTER_LEN;
-        if crc32::checksum(&data[..foot + 32]) != rd_u32(&data, foot + 32) {
+        let foot_at = size - FOOTER_LEN;
+        let foot = backing.read(foot_at, FOOTER_LEN)?;
+        if &foot[FOOTER_LEN - 4..] != END_MAGIC {
+            return Err(Error::Corrupt("bad segment magic"));
+        }
+        if backing.crc_prefix(foot_at + 40)? != rd_u32(&foot, 40) {
             return Err(Error::Corrupt("segment checksum mismatch"));
         }
 
-        let n_docs = rd_u32(&data, 8) as usize;
-        let n_terms = rd_u32(&data, 12) as usize;
-        let post_off = rd_u64(&data, foot) as usize;
-        let terms_off = rd_u64(&data, foot + 8) as usize;
-        let docs_off = rd_u64(&data, foot + 16) as usize;
-        let store_off = rd_u64(&data, foot + 24) as usize;
+        let n_docs = rd_u32(&foot, 0) as usize;
+        let n_terms = rd_u32(&foot, 4) as usize;
+        let post_off = rd_u64(&foot, 8) as usize;
+        let terms_off = rd_u64(&foot, 16) as usize;
+        let docs_off = rd_u64(&foot, 24) as usize;
+        let store_off = rd_u64(&foot, 32) as usize;
         if !(HEADER_LEN <= post_off
             && post_off <= terms_off
             && terms_off <= docs_off
             && docs_off <= store_off
-            && store_off <= foot)
+            && store_off <= foot_at)
         {
             return Err(Error::Corrupt("segment section offsets"));
         }
 
         let post_len = terms_off - post_off;
-        let store_len = foot - store_off;
+        let store_len = foot_at - store_off;
 
-        let mut terms = Vec::with_capacity(n_terms);
-        let tsec = &data[..docs_off];
-        let mut p = terms_off;
+        // the term dictionary and doc table are always resident; only
+        // postings and stored text can stay on disk
+        let tsec = backing.read(terms_off, docs_off - terms_off)?;
+        let mut terms = Vec::with_capacity(n_terms.min(tsec.len()));
+        let mut p = 0;
         for _ in 0..n_terms {
-            let tl = vbyte::read_u32(tsec, &mut p)? as usize;
-            let raw = tsec.get(p..p + tl).ok_or(Error::Corrupt("term bytes"))?;
+            let tl = vbyte::read_u32(&tsec, &mut p)? as usize;
+            let raw = tsec.get(p..p.saturating_add(tl)).ok_or(Error::Corrupt("term bytes"))?;
             let term = std::str::from_utf8(raw).map_err(|_| Error::Corrupt("term not utf8"))?.to_string();
             p += tl;
-            let doc_freq = vbyte::read_u32(tsec, &mut p)?;
-            let total_tf = vbyte::read_u64(tsec, &mut p)?;
-            let off = vbyte::read_u64(tsec, &mut p)? as usize;
-            let len = vbyte::read_u64(tsec, &mut p)? as usize;
+            let doc_freq = vbyte::read_u32(&tsec, &mut p)?;
+            let total_tf = vbyte::read_u64(&tsec, &mut p)?;
+            let off = vbyte::read_u64(&tsec, &mut p)? as usize;
+            let len = vbyte::read_u64(&tsec, &mut p)? as usize;
             if off.checked_add(len).is_none_or(|e| e > post_len) {
                 return Err(Error::Corrupt("term postings out of range"));
             }
@@ -227,17 +306,18 @@ impl Segment {
         if terms.windows(2).any(|w| w[0].term >= w[1].term) {
             return Err(Error::Corrupt("terms not sorted"));
         }
+        drop(tsec);
 
-        let mut docs = Vec::with_capacity(n_docs);
-        let mut by_ext = HashMap::with_capacity(n_docs);
-        let dsec = &data[..store_off];
-        let mut p = docs_off;
+        let dsec = backing.read(docs_off, store_off - docs_off)?;
+        let mut docs = Vec::with_capacity(n_docs.min(dsec.len()));
+        let mut by_ext = HashMap::with_capacity(n_docs.min(dsec.len()));
+        let mut p = 0;
         let mut total_len = 0u64;
         for i in 0..n_docs {
-            let ext_id = vbyte::read_u64(dsec, &mut p)?;
-            let len = vbyte::read_u32(dsec, &mut p)?;
-            let text_off = vbyte::read_u64(dsec, &mut p)?;
-            let text_len = vbyte::read_u32(dsec, &mut p)?;
+            let ext_id = vbyte::read_u64(&dsec, &mut p)?;
+            let len = vbyte::read_u32(&dsec, &mut p)?;
+            let text_off = vbyte::read_u64(&dsec, &mut p)?;
+            let text_len = vbyte::read_u32(&dsec, &mut p)?;
             if text_off.checked_add(text_len as u64).is_none_or(|e| e > store_len as u64) {
                 return Err(Error::Corrupt("doc text out of range"));
             }
@@ -245,12 +325,14 @@ impl Segment {
             by_ext.insert(ext_id, i as u32);
             docs.push(DocEntry { ext_id, len, text_off, text_len });
         }
+        drop(dsec);
 
         Ok(Segment {
             id,
-            data,
-            post_range: (post_off, terms_off),
-            store_range: (store_off, foot),
+            backing,
+            size,
+            post_off,
+            store_off,
             terms,
             docs,
             by_ext,
@@ -261,7 +343,19 @@ impl Segment {
     }
 
     pub fn open(dir: &Path, id: u64) -> Result<Segment> {
-        let seg = Segment::from_bytes(id, fs::read(seg_path(dir, id))?)?;
+        Segment::open_with(dir, id, u64::MAX)
+    }
+
+    /// Files up to `resident_limit` bytes are read into memory, bigger ones
+    /// stay on disk and are read per query.
+    pub fn open_with(dir: &Path, id: u64, resident_limit: u64) -> Result<Segment> {
+        let path = seg_path(dir, id);
+        let size = fs::metadata(&path)?.len();
+        let seg = if size <= resident_limit {
+            Segment::from_bytes(id, fs::read(&path)?)?
+        } else {
+            Segment::load(id, Backing::File(fs::File::open(&path)?), size as usize)?
+        };
         seg.load_deletes(&del_path(dir, id))?;
         Ok(seg)
     }
@@ -348,7 +442,7 @@ impl Segment {
     }
 
     pub fn byte_size(&self) -> usize {
-        self.data.len()
+        self.size
     }
 
     pub fn is_deleted(&self, local: u32) -> bool {
@@ -368,7 +462,7 @@ impl Segment {
         self.by_ext.get(&id).is_some_and(|&l| !self.is_deleted(l))
     }
 
-    pub fn text_of(&self, id: DocId) -> Option<&str> {
+    pub fn text_of(&self, id: DocId) -> Option<String> {
         let local = *self.by_ext.get(&id)?;
         if self.is_deleted(local) {
             return None;
@@ -376,12 +470,13 @@ impl Segment {
         self.text(local)
     }
 
-    pub fn text(&self, local: u32) -> Option<&str> {
+    pub fn text(&self, local: u32) -> Option<String> {
+        String::from_utf8(self.text_bytes(local).ok()?.into_owned()).ok()
+    }
+
+    pub(crate) fn text_bytes(&self, local: u32) -> Result<Cow<'_, [u8]>> {
         let d = &self.docs[local as usize];
-        let base = self.store_range.0;
-        let bytes =
-            self.data.get(base + d.text_off as usize..base + d.text_off as usize + d.text_len as usize)?;
-        std::str::from_utf8(bytes).ok()
+        self.backing.read(self.store_off + d.text_off as usize, d.text_len as usize)
     }
 
     pub fn terms(&self) -> &[TermEntry] {
@@ -393,12 +488,120 @@ impl Segment {
     }
 
     pub fn cursor(&self, e: &TermEntry) -> Result<PostingsCursor<'_>> {
-        let blob = &self.data[self.post_range.0..self.post_range.1];
-        let cur = PostingsCursor::new(&blob[e.off..e.off + e.len])?;
+        let cur = PostingsCursor::from_cow(self.backing.read(self.post_off + e.off, e.len)?)?;
         if cur.max_doc().is_some_and(|d| d as usize >= self.docs.len()) {
             return Err(Error::Corrupt("posting refers to a doc beyond the segment"));
         }
         Ok(cur)
+    }
+}
+
+/// Writes a segment front to back without holding it in memory: postings go
+/// out as each term is finished, the term and doc tables (small) at the end.
+pub struct StreamWriter {
+    out: BufWriter<fs::File>,
+    crc: crc32::Crc,
+    pos: u64,
+    tmp: PathBuf,
+    path: PathBuf,
+    post_off: u64,
+    terms: Vec<TermEntry>,
+}
+
+impl StreamWriter {
+    pub fn create(path: &Path) -> Result<Self> {
+        let tmp = path.with_extension("tmp");
+        let file = fs::File::create(&tmp)?;
+        let mut w = StreamWriter {
+            out: BufWriter::with_capacity(1 << 20, file),
+            crc: crc32::Crc::new(),
+            pos: 0,
+            tmp,
+            path: path.to_path_buf(),
+            post_off: 0,
+            terms: Vec::new(),
+        };
+        w.put(MAGIC)?;
+        w.put(&VERSION.to_le_bytes())?;
+        w.post_off = w.pos;
+        Ok(w)
+    }
+
+    fn put(&mut self, b: &[u8]) -> Result<()> {
+        self.out.write_all(b)?;
+        self.crc.update(b);
+        self.pos += b.len() as u64;
+        Ok(())
+    }
+
+    /// Same ordering rule as `SegmentWriter::add_term`.
+    pub fn add_term(&mut self, term: &str, p: EncodedPostings) -> Result<()> {
+        self.terms.push(TermEntry {
+            term: term.to_string(),
+            doc_freq: p.doc_freq,
+            total_tf: p.total_tf,
+            off: (self.pos - self.post_off) as usize,
+            len: p.bytes.len(),
+        });
+        self.put(&p.bytes)
+    }
+
+    /// `docs` is (ext_id, token_len, text_len) per doc; `text(i)` returns the
+    /// raw stored bytes of doc i, which must be exactly `text_len` long.
+    pub fn finish(
+        mut self,
+        docs: &[(DocId, u32, u32)],
+        mut text: impl FnMut(usize) -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        let terms_off = self.pos;
+        let terms = std::mem::take(&mut self.terms);
+        let n_terms = terms.len() as u32;
+        let mut sec = Vec::new();
+        for t in terms {
+            vbyte::write_u32(&mut sec, t.term.len() as u32);
+            sec.extend_from_slice(t.term.as_bytes());
+            vbyte::write_u32(&mut sec, t.doc_freq);
+            vbyte::write_u64(&mut sec, t.total_tf);
+            vbyte::write_u64(&mut sec, t.off as u64);
+            vbyte::write_u64(&mut sec, t.len as u64);
+        }
+        self.put(&sec)?;
+
+        let docs_off = self.pos;
+        let mut sec = Vec::new();
+        let mut text_off = 0u64;
+        for &(ext_id, len, text_len) in docs {
+            vbyte::write_u64(&mut sec, ext_id);
+            vbyte::write_u32(&mut sec, len);
+            vbyte::write_u64(&mut sec, text_off);
+            vbyte::write_u32(&mut sec, text_len);
+            text_off += text_len as u64;
+        }
+        self.put(&sec)?;
+
+        let store_off = self.pos;
+        for (i, &(_, _, text_len)) in docs.iter().enumerate() {
+            let bytes = text(i)?;
+            if bytes.len() != text_len as usize {
+                return Err(Error::Corrupt("stored text length changed during merge"));
+            }
+            self.put(&bytes)?;
+        }
+
+        let mut foot = Vec::with_capacity(FOOTER_LEN);
+        foot.extend_from_slice(&(docs.len() as u32).to_le_bytes());
+        foot.extend_from_slice(&n_terms.to_le_bytes());
+        for off in [self.post_off, terms_off, docs_off, store_off] {
+            foot.extend_from_slice(&off.to_le_bytes());
+        }
+        self.put(&foot)?;
+        let crc = self.crc.finish();
+        self.out.write_all(&crc.to_le_bytes())?;
+        self.out.write_all(END_MAGIC)?;
+        self.out.flush()?;
+        self.out.get_ref().sync_all()?;
+        fs::rename(&self.tmp, &self.path)?;
+        Ok(())
     }
 }
 
@@ -432,7 +635,7 @@ mod tests {
         assert_eq!(seg.live_token_len(), 4);
         assert_eq!(seg.term("beta").unwrap().doc_freq, 2);
         assert!(seg.term("gamma").is_none());
-        assert_eq!(seg.text_of(11), Some("beta"));
+        assert_eq!(seg.text_of(11).as_deref(), Some("beta"));
 
         let mut c = seg.cursor(seg.term("beta").unwrap()).unwrap();
         assert_eq!(c.next().unwrap(), Some(0));

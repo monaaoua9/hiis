@@ -99,7 +99,7 @@ fn main() {
     {
         let dir = std::env::temp_dir().join("cmp-hiis");
         let _ = fs::remove_dir_all(&dir);
-        let e = hiis::Engine::open(&dir, hiis::Config::default()).unwrap();
+        let e = hiis::Engine::open(&dir, hiis::Config { resident_limit: std::env::var("RESIDENT_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(512 << 20), ..hiis::Config::default() }).unwrap();
         let t = Instant::now();
         // add_documents spreads analysis over the cores itself
         for b in c.texts.chunks(2048) {

@@ -49,7 +49,7 @@ tail block (<128): df_len | vbyte(doc deltas) vbyte(freqs) | positions
 ## Segment file
 
 ```
-header 16B | postings | term dictionary (sorted) | doc table | stored text | footer (offsets, CRC32, magic)
+header 8B | postings | term dictionary (sorted) | doc table | stored text | footer (counts, offsets, CRC32, magic)
 ```
 
 Opening a segment verifies magic, version, section bounds and the CRC of the
@@ -91,13 +91,15 @@ Plain multi-term queries (`a b c`) skip documents that cannot reach the current 
 
 ## Known limits (deliberate scope)
 
-* Segments are read fully into memory (no mmap, since the crate is `unsafe`-free
-  and dependency-free). Swapping `Vec<u8>` for a mapped slice is local to `segment.rs`.
+* Segment files up to `Config::resident_limit` (512 MB) are held in memory; bigger
+  ones keep only the term dictionary and doc table resident and read postings and
+  stored text with positional reads (no mmap, since the crate is `unsafe`-free and
+  dependency-free). That mode costs query latency, roughly 1.5-2x on TREC-COVID.
 * Doc length is exact (not Lucene's 1-byte lossy norm); document frequencies
   include tombstoned docs until the next merge.
 * Prefix queries (`foo*`) match folded, unstemmed terms against the stemmed
   dictionary, so `runn*` misses `run`; expansion is capped at 256 terms and
   these queries skip pruning.
-* A merge holds its inputs and its output in memory; `max_merged_docs` is the
-  only bound on that.
+* A merge streams its output to disk, but it still keeps the merged term and doc
+  tables in memory; `max_merged_docs` bounds that.
 * English stemmer/stopwords only; Arabic gets orthographic folding but no stemming.

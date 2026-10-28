@@ -10,6 +10,8 @@
 * `examples/eval.rs`: nDCG/MRR/recall on BEIR-format collections (SciFact nDCG@10 = 0.683).
 * Multi-term pruning is now MaxScore instead of WAND: 3.6x less query time on TREC-COVID, still bit-identical to exhaustive scoring.
 * Per-thread stem cache; `add_documents` analyses a batch across cores.
+* Segment format v3: counts moved to the footer so merges can stream their output. Merged segments are written straight to disk.
+* `Config::resident_limit`: segments bigger than this are read from disk with positional reads instead of being held in memory.
 * `bench-compare/`: side-by-side run against Tantivy.
 
 ## 0.1.0

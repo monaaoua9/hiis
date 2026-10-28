@@ -47,6 +47,9 @@ pub struct Config {
     /// fsync the log on every add: survives power loss, costs an fsync per document.
     /// Off, the log still survives a process crash (data is in the OS cache).
     pub wal_fsync: bool,
+    /// segment files up to this size are held in memory; bigger ones are read
+    /// from disk per query, so index size is not capped by RAM
+    pub resident_limit: u64,
 }
 
 impl Default for Config {
@@ -60,6 +63,7 @@ impl Default for Config {
             merge: MergePolicy::default(),
             background_merge: true,
             wal_fsync: false,
+            resident_limit: 512 << 20,
         }
     }
 }
@@ -146,7 +150,7 @@ impl Engine {
 
         let mut segments = Vec::with_capacity(ids.len());
         for &id in &ids {
-            segments.push(Arc::new(Segment::open(&dir, id)?));
+            segments.push(Arc::new(Segment::open_with(&dir, id, cfg.resident_limit)?));
         }
         remove_orphans(&dir, &ids);
 
@@ -287,7 +291,7 @@ impl Engine {
 
     pub fn get(&self, id: DocId) -> Option<String> {
         let segs = self.shared.segments.read().unwrap();
-        segs.iter().find_map(|s| s.text_of(id)).map(str::to_string)
+        segs.iter().find_map(|s| s.text_of(id))
     }
 
     /// Merge everything into one segment, dropping deleted docs.
@@ -360,7 +364,12 @@ impl Shared {
         let id = self.next_seg.fetch_add(1, Ordering::Relaxed);
         let bytes = b.build();
         write_atomic(&seg_path(&self.dir, id), &bytes)?;
-        let seg = Arc::new(Segment::from_bytes(id, bytes)?);
+        let seg = if bytes.len() as u64 > self.cfg.resident_limit {
+            drop(bytes);
+            Arc::new(Segment::open_with(&self.dir, id, self.cfg.resident_limit)?)
+        } else {
+            Arc::new(Segment::from_bytes(id, bytes)?)
+        };
 
         self.segments.write().unwrap().push(seg);
         self.flushed_upto.store(self.next_doc.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -407,10 +416,9 @@ impl Shared {
     // caller holds merge_mu
     fn run_merge(&self, src: Vec<Arc<Segment>>, snaps: Vec<Vec<u64>>) -> Result<()> {
         // heavy part: no engine locks held, readers and writers carry on
-        let bytes = merge_segments(&src, &snaps)?;
         let id = self.next_seg.fetch_add(1, Ordering::Relaxed);
-        write_atomic(&seg_path(&self.dir, id), &bytes)?;
-        let merged = Arc::new(Segment::from_bytes(id, bytes)?);
+        merge_segments(&src, &snaps, &seg_path(&self.dir, id))?;
+        let merged = Arc::new(Segment::open_with(&self.dir, id, self.cfg.resident_limit)?);
 
         {
             // deletes take the read lock, so under the write lock none can slip in
@@ -431,7 +439,7 @@ impl Shared {
         }
         self.write_manifest()?;
 
-        // readers holding the old Arcs are unaffected: segments live in memory
+        // readers holding the old Arcs are unaffected: they keep their bytes or file handle
         for s in &src {
             let _ = fs::remove_file(seg_path(&self.dir, s.id()));
             let _ = fs::remove_file(del_path(&self.dir, s.id()));

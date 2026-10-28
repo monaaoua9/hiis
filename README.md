@@ -11,7 +11,7 @@ A full-text search storage engine in safe Rust, with no dependencies.
 * MaxScore top-k pruning (bit-identical to exhaustive scoring)
 * Okapi BM25 ranking, `+must -not "phrase" prefix*` query syntax, top-k heap
 * Write-ahead log with crash replay (optional fsync per add, or per batch via `add_documents`)
-* Merge size cap (`max_merged_docs`) that bounds merge memory
+* Streamed merges, a merge size cap (`max_merged_docs`), and segments past `resident_limit` read from disk instead of RAM
 * Exclusive directory lock; checksum-valid-but-corrupt segments give errors, not panics
 * Lock-free reads on `Arc` snapshots; crash-safe manifest (tmp + fsync + rename)
 
@@ -42,7 +42,7 @@ cargo run --release -- stats  ./idx
 ## Test and measure
 
 ```
-cargo test                                   # 59 unit + 20 integration + 8 robustness + doctest
+cargo test                                   # 59 unit + 20 integration + 1 disk-backed + 8 robustness + doctest
 cargo run --release --example bench -- 100000 [threads]
 ```
 

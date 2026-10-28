@@ -6,11 +6,12 @@
 //! concatenated in order, so renumbered doc ids stay ascending per term and
 //! postings can be appended without sorting.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::index::postings::PostingsWriter;
-use crate::index::segment::{bit_set, Segment, SegmentWriter};
+use crate::index::segment::{bit_set, Segment, StreamWriter};
 
 /// Tiered policy: bucket segments by size (log base `factor`), and when a
 /// bucket gets `factor` members, merge them. Small segments get merged often
@@ -78,28 +79,31 @@ impl MergePolicy {
 }
 
 /// `deleted[i]` is the tombstone bitmap of `sources[i]` as of the moment the
-/// merge was planned; later deletes are reconciled by the caller.
-pub fn merge_segments(sources: &[Arc<Segment>], deleted: &[Vec<u64>]) -> Result<Vec<u8>> {
+/// merge was planned; later deletes are reconciled by the caller. The merged
+/// segment is streamed to `out`, so peak memory is the term/doc tables plus
+/// one posting list, not the whole output.
+pub fn merge_segments(sources: &[Arc<Segment>], deleted: &[Vec<u64>], out: &Path) -> Result<()> {
     const GONE: u32 = u32::MAX;
 
-    let mut w = SegmentWriter::new();
+    let mut docs: Vec<(u64, u32, u32)> = Vec::new();
+    let mut survivors: Vec<(usize, u32)> = Vec::new();
     let mut remap: Vec<Vec<u32>> = Vec::with_capacity(sources.len());
-    let mut next = 0u32;
 
-    for (seg, bits) in sources.iter().zip(deleted) {
+    for (si, (seg, bits)) in sources.iter().zip(deleted).enumerate() {
         let mut map = vec![GONE; seg.n_docs() as usize];
         for local in 0..seg.n_docs() {
             if bit_set(bits, local) {
                 continue;
             }
             let d = seg.doc(local);
-            w.add_doc(d.ext_id, d.len, seg.text(local).unwrap_or(""));
-            map[local as usize] = next;
-            next += 1;
+            map[local as usize] = docs.len() as u32;
+            docs.push((d.ext_id, d.len, d.text_len));
+            survivors.push((si, local));
         }
         remap.push(map);
     }
 
+    let mut w = StreamWriter::create(out)?;
     let mut at = vec![0usize; sources.len()];
     let mut pos = Vec::new();
     loop {
@@ -126,11 +130,14 @@ pub fn merge_segments(sources: &[Arc<Segment>], deleted: &[Vec<u64>]) -> Result<
 
         let enc = pw.finish();
         if enc.doc_freq > 0 {
-            w.add_term(&term, enc);
+            w.add_term(&term, enc)?;
         }
     }
 
-    Ok(w.finish())
+    w.finish(&docs, |i| {
+        let (si, local) = survivors[i];
+        Ok(sources[si].text_bytes(local)?.into_owned())
+    })
 }
 
 #[cfg(test)]
