@@ -61,18 +61,21 @@ impl Analyzer {
     }
 
     fn normalize(&self, raw: &str) -> Option<String> {
-        let lowered = raw.to_lowercase();
-        let trimmed =
-            lowered.strip_suffix("'s").or_else(|| lowered.strip_suffix("\u{2019}s")).unwrap_or(&lowered);
-
-        let folded: String = trimmed.chars().filter_map(fold_char).collect();
+        let mut folded = raw.to_lowercase();
+        if let Some(n) = folded.strip_suffix("'s").or_else(|| folded.strip_suffix("\u{2019}s")).map(str::len)
+        {
+            folded.truncate(n);
+        }
+        if folded.chars().any(|c| fold_char(c) != Some(c)) {
+            folded = folded.chars().filter_map(fold_char).collect();
+        }
         if folded.is_empty() || folded.chars().count() > self.cfg.max_token_chars {
             return None;
         }
         if self.cfg.remove_stopwords && stopwords::is_stopword(&folded) {
             return None;
         }
-        Some(if self.cfg.stem { stemmer::stem(&folded) } else { folded })
+        Some(if self.cfg.stem { stemmer::stem(folded) } else { folded })
     }
 }
 

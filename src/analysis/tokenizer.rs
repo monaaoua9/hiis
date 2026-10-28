@@ -19,15 +19,14 @@ fn is_word_char(c: char) -> bool {
 }
 
 pub fn tokenize(text: &str) -> Vec<RawToken<'_>> {
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut chars = text.char_indices().peekable();
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
 
-    for (i, &(b, c)) in chars.iter().enumerate() {
+    while let Some((b, c)) = chars.next() {
         // "don't" stays one token, a bare quote mark doesn't start or end one
-        let inner_apos = is_apostrophe(c)
-            && start.is_some()
-            && chars.get(i + 1).is_some_and(|&(_, n)| n.is_alphanumeric());
+        let inner_apos =
+            is_apostrophe(c) && start.is_some() && chars.peek().is_some_and(|&(_, n)| n.is_alphanumeric());
         let word = is_word_char(c) || inner_apos;
 
         match (word, start) {

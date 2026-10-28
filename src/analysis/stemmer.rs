@@ -9,9 +9,9 @@ struct Stemmer {
     j: isize,
 }
 
-pub fn stem(word: &str) -> String {
+pub fn stem(word: String) -> String {
     if word.len() <= 2 || !word.bytes().all(|c| c.is_ascii_lowercase()) {
-        return word.to_string();
+        return word;
     }
     let mut s = Stemmer { b: word.as_bytes().to_vec(), k: word.len() as isize - 1, j: 0 };
     s.step1ab();
@@ -327,14 +327,14 @@ mod tests {
             ("searches", "search"),
         ];
         for (w, want) in cases {
-            assert_eq!(stem(w), want, "stem({w})");
+            assert_eq!(stem(w.to_string()), want, "stem({w})");
         }
     }
 
     #[test]
     fn leaves_short_and_non_ascii_alone() {
-        assert_eq!(stem("is"), "is");
-        assert_eq!(stem("café"), "café");
-        assert_eq!(stem("abc123"), "abc123");
+        assert_eq!(stem("is".into()), "is");
+        assert_eq!(stem("café".into()), "café");
+        assert_eq!(stem("abc123".into()), "abc123");
     }
 }
