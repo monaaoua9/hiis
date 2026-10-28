@@ -206,6 +206,27 @@ impl Engine {
         Ok(id)
     }
 
+    /// Same as calling `add_document` for each text, but the WAL gets one
+    /// write (and one fsync with `wal_fsync`) for the lot.
+    pub fn add_documents<S: AsRef<str>>(&self, texts: &[S]) -> Result<Vec<DocId>> {
+        let grouped: Vec<_> =
+            texts.iter().map(|t| SegmentBuilder::group(self.shared.analyzer.analyze(t.as_ref()))).collect();
+
+        let mut buf = self.shared.buffer.lock().unwrap();
+        let first = self.shared.next_doc.fetch_add(texts.len() as u64, Ordering::Relaxed);
+        let ids: Vec<DocId> = (first..first + texts.len() as u64).collect();
+        let batch: Vec<(DocId, &str)> = ids.iter().copied().zip(texts.iter().map(|t| t.as_ref())).collect();
+        self.shared.wal.lock().unwrap().append_batch(&batch)?;
+        for ((id, text), g) in batch.into_iter().zip(grouped) {
+            buf.add(id, text, g);
+        }
+        let c = &self.shared.cfg;
+        if buf.len() >= c.flush_docs || buf.ram_bytes() >= c.flush_bytes {
+            self.shared.flush(&mut buf)?;
+        }
+        Ok(ids)
+    }
+
     /// Flush the buffer and persist pending deletes.
     pub fn commit(&self) -> Result<()> {
         {

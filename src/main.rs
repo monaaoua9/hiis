@@ -37,9 +37,10 @@ fn run(args: &[String]) -> Result<()> {
             let text = fs::read_to_string(file)?;
             let t = Instant::now();
             let mut n = 0usize;
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                engine.add_document(line)?;
-                n += 1;
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            for chunk in lines.chunks(256) {
+                engine.add_documents(chunk)?;
+                n += chunk.len();
             }
             engine.commit()?;
             let secs = t.elapsed().as_secs_f64();

@@ -107,6 +107,24 @@ fn prefix_queries_expand_over_the_dictionary() {
 }
 
 #[test]
+fn batch_add_matches_single_adds() {
+    let single = loaded(small_cfg());
+    let dir = TmpDir::new();
+    let e = Engine::open(&dir.0, small_cfg()).unwrap();
+    let ids_out = e.add_documents(CORPUS).unwrap();
+    assert_eq!(ids_out, (0..CORPUS.len() as u64).collect::<Vec<_>>());
+    assert!(e.add_documents::<&str>(&[]).unwrap().is_empty());
+    e.commit().unwrap();
+    for q in ["quick fox", "\"posting lists\"", "+dog -lazy", "compres*"] {
+        assert_eq!(e.search(q, 10).unwrap(), single.1.search(q, 10).unwrap(), "{q}");
+    }
+    drop(e);
+    // and it survives a reopen
+    let e = Engine::open(&dir.0, small_cfg()).unwrap();
+    assert_eq!(e.search("quick fox", 10).unwrap(), single.1.search("quick fox", 10).unwrap());
+}
+
+#[test]
 fn must_and_must_not() {
     let (_d, e) = loaded(Config::default());
     let mut got = ids(&e.search("+dog +lazy", 10).unwrap());

@@ -48,16 +48,24 @@ impl Wal {
     }
 
     pub fn append(&mut self, id: DocId, text: &str) -> Result<()> {
-        let mut payload = Vec::with_capacity(8 + text.len());
-        payload.extend_from_slice(&id.to_le_bytes());
-        payload.extend_from_slice(text.as_bytes());
+        self.append_batch(&[(id, text)])
+    }
 
-        // one write call per record so a crash leaves at most one torn record
-        let mut rec = Vec::with_capacity(8 + payload.len());
-        rec.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        rec.extend_from_slice(&crc32::checksum(&payload).to_le_bytes());
-        rec.extend_from_slice(&payload);
-        self.file.write_all(&rec)?;
+    // one write and (optionally) one fsync for the whole batch. A crash can
+    // tear the batch, replay then keeps its intact prefix
+    pub fn append_batch(&mut self, docs: &[(DocId, &str)]) -> Result<()> {
+        let mut out = Vec::with_capacity(docs.iter().map(|d| 16 + d.1.len()).sum());
+        for &(id, text) in docs {
+            let start = out.len();
+            out.extend_from_slice(&[0; 8]);
+            out.extend_from_slice(&id.to_le_bytes());
+            out.extend_from_slice(text.as_bytes());
+            let payload = &out[start + 8..];
+            let (len, crc) = (payload.len() as u32, crc32::checksum(payload));
+            out[start..start + 4].copy_from_slice(&len.to_le_bytes());
+            out[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+        }
+        self.file.write_all(&out)?;
         if self.fsync {
             self.file.sync_data()?;
         }
@@ -99,6 +107,19 @@ mod tests {
         w.reset().unwrap();
         drop(w);
         assert!(Wal::open(&p, false).unwrap().1.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn batch_is_replayed_in_order() {
+        let p = tmp("d");
+        {
+            let (mut w, _) = Wal::open(&p, false).unwrap();
+            w.append_batch(&[(1, "one"), (2, ""), (3, "three")]).unwrap();
+            w.append_batch(&[]).unwrap();
+        }
+        let recs = Wal::open(&p, false).unwrap().1;
+        assert_eq!(recs, [(1, "one".to_string()), (2, String::new()), (3, "three".to_string())]);
         let _ = std::fs::remove_file(&p);
     }
 

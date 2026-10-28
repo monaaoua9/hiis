@@ -6,6 +6,7 @@
 * `MergePolicy::max_merged_docs` (default 5M) caps merge size and so peak merge memory; segments at the cap are left alone.
 * Analyzer allocates once per token instead of three times (tokenizer no longer collects chars, stemmer takes the string by value).
 * Per-document term grouping happens before the buffer lock is taken, so concurrent `add_document` calls only serialise on the hash-map merge and the WAL append. `bench` takes a thread count as second argument.
+* `Engine::add_documents`: batch ingest with a single WAL write and fsync; the CLI `index` command uses it.
 
 ## 0.1.0
 
