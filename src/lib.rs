@@ -1,4 +1,4 @@
-﻿//! HIIS: a segment-based full-text search storage engine.
+//! HIIS: a segment-based full-text search storage engine.
 //!
 //! Text goes through [`analysis`] into positioned terms, lands in an
 //! in-memory builder, and is flushed as an immutable [`index::segment`]

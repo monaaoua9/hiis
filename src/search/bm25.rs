@@ -1,4 +1,4 @@
-﻿//! Okapi BM25.
+//! Okapi BM25.
 //!
 //! score(d, q) = sum over terms t of  idf(t) * tf * (k1 + 1) / (tf + k1 * (1 - b + b * |d| / avgdl))
 //! idf(t)      = ln(1 + (N - n_t + 0.5) / (n_t + 0.5))

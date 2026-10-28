@@ -1,4 +1,4 @@
-﻿The quick brown fox jumps over the lazy dog
+The quick brown fox jumps over the lazy dog
 A fast brown dog outpaces a quick fox
 Inverted indexes map every term to the documents containing it
 Posting lists are compressed with frame of reference encoding

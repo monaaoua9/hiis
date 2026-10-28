@@ -1,4 +1,4 @@
-﻿//! Frame-of-reference packing for fixed-size blocks.
+//! Frame-of-reference packing for fixed-size blocks.
 //!
 //! One packed run is `[width: u8][min: vbyte][ceil(n*width/8) bytes]`. Every
 //! value is stored as `v - min` in `width` bits, LSB first. When all values

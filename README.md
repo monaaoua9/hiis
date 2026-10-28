@@ -1,4 +1,6 @@
-﻿# HIIS: High-Throughput Inverted Index Search Storage Engine
+# HIIS: High-Throughput Inverted Index Search Storage Engine
+
+[![ci](https://github.com/monaaoua9/hiis/actions/workflows/ci.yml/badge.svg)](https://github.com/monaaoua9/hiis/actions/workflows/ci.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A full-text search storage engine in safe Rust, with no dependencies.
 
