@@ -21,11 +21,15 @@ pub struct MergePolicy {
     pub max_at_once: usize,
     // everything below this many live docs counts as the same tier
     pub floor_docs: u32,
+    // a merge reads all inputs into memory and builds the output next to them,
+    // so this is what bounds the peak: bigger segments are left alone and a
+    // merge never produces more live docs than this
+    pub max_merged_docs: u32,
 }
 
 impl Default for MergePolicy {
     fn default() -> Self {
-        MergePolicy { factor: 4, max_at_once: 10, floor_docs: 1000 }
+        MergePolicy { factor: 4, max_at_once: 10, floor_docs: 1000, max_merged_docs: 5_000_000 }
     }
 }
 
@@ -36,6 +40,9 @@ impl MergePolicy {
         let mut tiers: Vec<(u32, Vec<usize>)> = Vec::new();
 
         for (i, &n) in live.iter().enumerate() {
+            if n >= self.max_merged_docs {
+                continue;
+            }
             let mut size = self.floor_docs.max(1) as u64;
             let mut tier = 0u32;
             while (n as u64) >= size * factor as u64 {
@@ -53,6 +60,15 @@ impl MergePolicy {
             if members.len() >= factor {
                 members.sort_by_key(|&i| live[i]);
                 members.truncate(self.max_at_once.max(factor));
+                // smallest first, so trimming drops the biggest
+                let mut total = 0u64;
+                members.retain(|&i| {
+                    total += live[i] as u64;
+                    total <= self.max_merged_docs as u64
+                });
+                if members.len() < 2 {
+                    continue;
+                }
                 members.sort_unstable();
                 return Some(members);
             }
@@ -122,7 +138,7 @@ mod tests {
     use super::*;
 
     fn policy(factor: usize) -> MergePolicy {
-        MergePolicy { factor, max_at_once: 8, floor_docs: 10 }
+        MergePolicy { factor, max_at_once: 8, floor_docs: 10, ..MergePolicy::default() }
     }
 
     #[test]
@@ -146,8 +162,19 @@ mod tests {
     }
 
     #[test]
+    fn merged_size_is_capped() {
+        let p = MergePolicy { max_merged_docs: 100, ..policy(2) };
+        // 60 is too big to be a candidate, the rest fit
+        assert_eq!(p.select(&[60, 20, 20, 30]), Some(vec![1, 2, 3]));
+        // 50+50 would hit the cap exactly, a third doesn't fit
+        assert_eq!(p.select(&[50, 50, 50]), Some(vec![0, 1]));
+        // already at the cap: never touched again
+        assert_eq!(p.select(&[100, 100, 100]), None);
+    }
+
+    #[test]
     fn caps_merge_width() {
-        let p = MergePolicy { factor: 2, max_at_once: 3, floor_docs: 10 };
+        let p = MergePolicy { factor: 2, max_at_once: 3, floor_docs: 10, ..MergePolicy::default() };
         let picked = p.select(&[1; 7]).unwrap();
         assert_eq!(picked.len(), 3);
     }

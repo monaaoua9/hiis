@@ -3,6 +3,7 @@
 ## Unreleased
 
 * Prefix queries (`compres*`), expanded against the sorted term dictionary of every segment.
+* `MergePolicy::max_merged_docs` (default 5M) caps merge size and so peak merge memory; segments at the cap are left alone.
 
 ## 0.1.0
 

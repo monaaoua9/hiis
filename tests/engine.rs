@@ -29,7 +29,7 @@ fn small_cfg() -> Config {
     Config {
         flush_docs: 3,
         background_merge: false,
-        merge: MergePolicy { factor: 2, max_at_once: 8, floor_docs: 2 },
+        merge: MergePolicy { factor: 2, max_at_once: 8, floor_docs: 2, ..MergePolicy::default() },
         ..Config::default()
     }
 }
@@ -364,7 +364,7 @@ fn wand_pruning_matches_exhaustive_scoring_exactly() {
     let dir = TmpDir::new();
     let cfg = Config {
         flush_docs: 700,
-        merge: MergePolicy { factor: 3, max_at_once: 8, floor_docs: 50 },
+        merge: MergePolicy { factor: 3, max_at_once: 8, floor_docs: 50, ..MergePolicy::default() },
         ..small_cfg()
     };
     let e = Engine::open(&dir.0, cfg).unwrap();
