@@ -95,4 +95,9 @@ Plain multi-term queries (`a b c`) skip documents that cannot reach the current 
   and dependency-free). Swapping `Vec<u8>` for a mapped slice is local to `segment.rs`.
 * Doc length is exact (not Lucene's 1-byte lossy norm); document frequencies
   include tombstoned docs until the next merge.
+* Prefix queries (`foo*`) match folded, unstemmed terms against the stemmed
+  dictionary, so `runn*` misses `run`; expansion is capped at 256 terms and
+  these queries skip WAND.
+* A merge holds its inputs and its output in memory; `max_merged_docs` is the
+  only bound on that.
 * English stemmer/stopwords only; Arabic gets orthographic folding but no stemming.
