@@ -213,78 +213,72 @@ fn wand_segment(
         return Ok(());
     }
 
+    // MaxScore: lanes sorted by upper bound; the cheap prefix whose bounds add up
+    // to less than the k-th score can't produce a top-k doc on its own, so only
+    // the remaining lanes drive the iteration and the prefix is probed with
+    // advance() for the docs they find
+    lanes.sort_by(|a, b| a.ub.total_cmp(&b.ub).then(a.order.cmp(&b.order)));
+    let mut prefix = vec![0.0f32; lanes.len() + 1];
+    for (i, l) in lanes.iter().enumerate() {
+        prefix[i + 1] = prefix[i] + l.ub;
+    }
+
+    let mut ne = 0; // lanes[..ne] are non-essential
     let mut parts: Vec<(usize, f32)> = Vec::with_capacity(lanes.len());
-    while !lanes.is_empty() {
-        lanes.sort_by_key(lane_doc);
+    loop {
         let theta = if heap.len() < k { f32::NEG_INFINITY } else { heap.peek().unwrap().0.score };
-
-        // pivot: first lane where the cumulative term bound can reach theta
-        let mut acc = 0.0f32;
-        let Some(p) = lanes.iter().position(|l| {
-            acc += l.ub;
-            acc * SLACK >= theta
-        }) else {
-            break; // nothing left can beat the current top-k
-        };
-
-        let pdoc = lane_doc(&lanes[p]);
-        if lane_doc(&lanes[0]) != pdoc {
-            // lagging lanes can't produce a candidate before pdoc
-            if lanes[0].cur.advance(pdoc)?.is_none() {
-                lanes.remove(0);
-            }
-            continue;
+        while ne < lanes.len() && prefix[ne + 1] * SLACK < theta {
+            ne += 1;
+        }
+        if ne == lanes.len() {
+            break;
         }
 
-        let aligned = lanes.iter().take_while(|l| lane_doc(l) == pdoc).count();
+        let d = lanes[ne..].iter().map(lane_doc).min().unwrap();
+        if d == u32::MAX {
+            break;
+        }
 
-        // block-level bound for the lanes sitting on pdoc
-        let block_ub: f32 =
-            lanes[..aligned].iter().map(|l| ctx.bm25.upper_bound(l.idf, l.cur.block_max_tf())).sum();
-        if block_ub * SLACK < theta {
-            // nothing in [pdoc, limit] can qualify: only these lanes' current
-            // blocks (or lanes already past limit) cover that range
-            let mut limit = lanes[..aligned].iter().map(|l| l.cur.block_last_doc()).min().unwrap();
-            if let Some(next) = lanes.get(aligned) {
-                limit = limit.min(lane_doc(next) - 1);
-            }
-            let mut i = 0;
-            let mut n = aligned;
-            while i < n {
-                if lanes[i].cur.advance(limit.saturating_add(1))?.is_none() {
-                    lanes.remove(i);
-                    n -= 1;
-                } else {
-                    i += 1;
+        parts.clear();
+        let mut sum = 0.0f32;
+        if !bit_set(&dels, d) {
+            let dl = seg.doc(d).len as f32;
+            for l in &lanes[ne..] {
+                if lane_doc(l) == d {
+                    let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len);
+                    parts.push((l.order, sc));
+                    sum += sc;
                 }
             }
-            continue;
-        }
 
-        if !bit_set(&dels, pdoc) {
-            let dl = seg.doc(pdoc).len as f32;
-            parts.clear();
-            parts.extend(
-                lanes[..aligned]
-                    .iter()
-                    .map(|l| (l.order, ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len))),
-            );
-            parts.sort_by_key(|x| x.0);
-            let mut score = parts[0].1;
-            for p in &parts[1..] {
-                score += p.1;
+            let mut rest = prefix[ne];
+            if (sum + rest) * SLACK >= theta {
+                for l in lanes[..ne].iter_mut().rev() {
+                    if l.cur.advance(d)? == Some(d) {
+                        let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len);
+                        parts.push((l.order, sc));
+                        sum += sc;
+                    }
+                    rest -= l.ub;
+                    if (sum + rest) * SLACK < theta {
+                        parts.clear();
+                        break;
+                    }
+                }
+                if !parts.is_empty() {
+                    parts.sort_by_key(|x| x.0);
+                    let mut score = parts[0].1;
+                    for p in &parts[1..] {
+                        score += p.1;
+                    }
+                    offer(heap, k, Hit { doc_id: seg.doc(d).ext_id, score });
+                }
             }
-            offer(heap, k, Hit { doc_id: seg.doc(pdoc).ext_id, score });
         }
 
-        let mut i = 0;
-        let mut n = aligned;
-        while i < n {
-            if lanes[i].cur.next()?.is_none() {
-                lanes.remove(i);
-                n -= 1;
-            } else {
-                i += 1;
+        for l in lanes[ne..].iter_mut() {
+            if lane_doc(l) == d {
+                l.cur.next()?;
             }
         }
     }

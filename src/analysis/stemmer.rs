@@ -9,11 +9,41 @@ struct Stemmer {
     j: isize,
 }
 
-pub fn stem(word: String) -> String {
+// word frequencies are heavily skewed, so a few thousand entries absorb most
+// lookups; per thread because analyzers are shared and a lock here would hurt
+const CACHE_MAX: usize = 20_000;
+
+thread_local! {
+    static CACHE: std::cell::RefCell<std::collections::HashMap<String, String>> = Default::default();
+}
+
+pub fn stem(mut word: String) -> String {
     if word.len() <= 2 || !word.bytes().all(|c| c.is_ascii_lowercase()) {
         return word;
     }
-    let mut s = Stemmer { b: word.as_bytes().to_vec(), k: word.len() as isize - 1, j: 0 };
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(hit) = c.get(&word) {
+            // reuse the buffer we already own
+            word.clear();
+            word.push_str(hit);
+            return word;
+        }
+        if c.len() >= CACHE_MAX {
+            c.clear();
+        }
+        let out = stem_uncached(word.clone());
+        c.insert(word, out.clone());
+        out
+    })
+}
+
+fn stem_uncached(word: String) -> String {
+    if word.len() <= 2 || !word.bytes().all(|c| c.is_ascii_lowercase()) {
+        return word;
+    }
+    let k = word.len() as isize - 1;
+    let mut s = Stemmer { b: word.into_bytes(), k, j: 0 };
     s.step1ab();
     if s.k > 0 {
         s.step1c();
@@ -22,7 +52,9 @@ pub fn stem(word: String) -> String {
         s.step4();
         s.step5();
     }
-    String::from_utf8_lossy(&s.b[..=s.k as usize]).into_owned()
+    s.b.truncate(s.k as usize + 1);
+    // only ascii letters go in and the rules only write ascii
+    String::from_utf8(s.b).unwrap_or_default()
 }
 
 impl Stemmer {

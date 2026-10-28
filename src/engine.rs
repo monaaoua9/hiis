@@ -208,9 +208,23 @@ impl Engine {
 
     /// Same as calling `add_document` for each text, but the WAL gets one
     /// write (and one fsync with `wal_fsync`) for the lot.
-    pub fn add_documents<S: AsRef<str>>(&self, texts: &[S]) -> Result<Vec<DocId>> {
-        let grouped: Vec<_> =
-            texts.iter().map(|t| SegmentBuilder::group(self.shared.analyzer.analyze(t.as_ref()))).collect();
+    pub fn add_documents<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Result<Vec<DocId>> {
+        let an = &self.shared.analyzer;
+        let one = |t: &S| SegmentBuilder::group(an.analyze(t.as_ref()));
+        let lanes = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+        let grouped: Vec<_> = if lanes < 2 || texts.len() < 32 {
+            texts.iter().map(one).collect()
+        } else {
+            // analysis is the bulk of ingest cost and needs no shared state
+            let per = texts.len().div_ceil(lanes);
+            std::thread::scope(|sc| {
+                let jobs: Vec<_> = texts
+                    .chunks(per)
+                    .map(|part| sc.spawn(|| part.iter().map(one).collect::<Vec<_>>()))
+                    .collect();
+                jobs.into_iter().flat_map(|j| j.join().unwrap()).collect()
+            })
+        };
 
         let mut buf = self.shared.buffer.lock().unwrap();
         let first = self.shared.next_doc.fetch_add(texts.len() as u64, Ordering::Relaxed);

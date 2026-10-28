@@ -61,7 +61,8 @@ impl Analyzer {
     }
 
     fn normalize(&self, raw: &str) -> Option<String> {
-        let mut folded = raw.to_lowercase();
+        // most tokens are plain ascii; skip the unicode machinery for them
+        let mut folded = if raw.is_ascii() { raw.to_ascii_lowercase() } else { raw.to_lowercase() };
         if let Some(n) = folded.strip_suffix("'s").or_else(|| folded.strip_suffix("\u{2019}s")).map(str::len)
         {
             folded.truncate(n);
