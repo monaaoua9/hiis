@@ -8,7 +8,7 @@ A full-text search storage engine in safe Rust, with no dependencies.
 * Inverted index with positions (phrase queries)
 * Posting-list compression: Frame-of-Reference bit-packing + variable-byte, with skip tables
 * Immutable, checksummed segments; tiered background merging; tombstone deletes
-* WAND + block-max top-k pruning (bit-identical to exhaustive scoring)
+* MaxScore top-k pruning (bit-identical to exhaustive scoring)
 * Okapi BM25 ranking, `+must -not "phrase" prefix*` query syntax, top-k heap
 * Write-ahead log with crash replay (optional fsync per add, or per batch via `add_documents`)
 * Merge size cap (`max_merged_docs`) that bounds merge memory
@@ -56,7 +56,7 @@ convergence, concurrent indexing + searching, and the directory lock.
 Sample bench run (synthetic skewed corpus, 100k docs, one noisy Windows
 machine, so treat as order of magnitude): 3-9k docs/s ingest (run-to-run spread; the WAL accounts for under 3% of it), 1.6-2.4 s to merge
 down to one segment, 2-6 ms for single-term queries matching ~95% of docs,
-~13-27 ms for a phrase over two such terms. WAND pruning on 2-3 term OR queries with a rare term: ~0.5 ms vs ~2-3.5 ms exhaustive (4-6x).
+~13-27 ms for a phrase over two such terms. Pruning on multi-term OR queries: 3.6x less total time than exhaustive on TREC-COVID (see below).
 
 ## Ranking quality
 
@@ -73,6 +73,30 @@ flat BM25 baseline is about 0.679 on the same split.
 
 ```
 cargo run --release --example eval -- path/to/scifact
+```
+
+## Against Tantivy
+
+`bench-compare/` is a separate crate (the main one stays dependency-free) that
+runs the same BEIR collection, queries and qrels through hiis and Tantivy 0.27,
+with an equivalent analyzer (lowercase, English stopwords, Porter stemmer),
+OR queries, top-10, stored text on both, and each index merged down to one
+segment. One 8-core Windows machine, so numbers move around by 20% or more
+between runs:
+
+| collection | engine | index time | docs/s | on disk | nDCG@10 | query p50 / p95 |
+|---|---|---|---|---|---|---|
+| SciFact, 5k docs | hiis | 0.7 s | 7,600 | 10 MB | 0.6827 | 0.23 / 0.60 ms |
+| | tantivy | 1.2 s | 4,400 | 22 MB | 0.6863 | 0.46 / 1.06 ms |
+| TREC-COVID, 171k docs, 192 MB | hiis | 17.8 s | 9,600 | 246 MB | 0.5798 | 2.7 / 7.9 ms |
+| | tantivy | 10.5 s | 16,400 | 170 MB | 0.5794 | 3.0 / 8.7 ms |
+
+Ranking quality is the same. Queries are on par. Tantivy still indexes about
+1.7x faster on the large set and its index is smaller, since it compresses the
+stored text and hiis keeps it raw.
+
+```
+cd bench-compare && cargo run --release -- path/to/trec-covid 8
 ```
 
 ## Layout

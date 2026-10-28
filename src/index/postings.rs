@@ -17,7 +17,7 @@
 //! the positions behind the doc/freq section means a pure ranking query never
 //! touches them, and the skip table lets `advance` hop over whole blocks
 //! without decoding. `max_tf` per block feeds the score upper bounds used by
-//! WAND pruning in `search`.
+//! MaxScore pruning in `search`.
 
 use crate::codec::bitpack::{self, BLOCK_LEN};
 use crate::codec::vbyte;

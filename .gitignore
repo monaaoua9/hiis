@@ -1,3 +1,4 @@
 /target
 /idx
 *.tmp
+/bench-compare/target

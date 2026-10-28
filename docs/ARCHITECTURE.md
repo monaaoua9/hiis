@@ -85,9 +85,9 @@ on segment boundaries (a test checks results are identical before/after a merge)
 Phrase clauses score with the phrase frequency as `tf` and the sum of the terms' IDFs.
 
 
-## Top-k pruning (WAND + block-max)
+## Top-k pruning (MaxScore)
 
-Plain multi-term queries (`a b c`) skip documents that cannot reach the current k-th score. Each skip-table entry stores the block's `max_tf`, which gives a score upper bound (BM25 rises with tf and falls with length, so length 0 is the ceiling). WAND picks a pivot doc from term-level bounds, then a block-level bound lets whole 128-doc blocks be skipped. Pruning only drops docs whose bound is strictly below the heap minimum, and survivors are summed in clause order, so results are **bit-identical** to exhaustive scoring (a randomized test compares 180 query/k combinations across merged segments with deletes). MUST/NOT/phrase queries use the exhaustive path.
+Plain multi-term queries (`a b c`) skip documents that cannot reach the current k-th score. Each skip-table entry stores the block's `max_tf`, which gives a score upper bound (BM25 rises with tf and falls with length, so length 0 is the ceiling). Terms are sorted by their bound; the cheap prefix whose bounds add up to less than the k-th score cannot produce a top-k doc by itself, so only the remaining terms drive the iteration and the prefix is probed with `advance` for the docs they find (a doc is dropped early once its partial score plus the remaining bounds falls below the threshold). A single term skips whole 128-doc blocks using the block bound. Pruning only drops docs whose bound is strictly below the heap minimum, and survivors are summed in clause order, so results are **bit-identical** to exhaustive scoring (a randomized test compares 180 query/k combinations across merged segments with deletes). MUST/NOT/phrase queries use the exhaustive path.
 
 ## Known limits (deliberate scope)
 
@@ -97,7 +97,7 @@ Plain multi-term queries (`a b c`) skip documents that cannot reach the current 
   include tombstoned docs until the next merge.
 * Prefix queries (`foo*`) match folded, unstemmed terms against the stemmed
   dictionary, so `runn*` misses `run`; expansion is capped at 256 terms and
-  these queries skip WAND.
+  these queries skip pruning.
 * A merge holds its inputs and its output in memory; `max_merged_docs` is the
   only bound on that.
 * English stemmer/stopwords only; Arabic gets orthographic folding but no stemming.

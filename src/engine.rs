@@ -276,7 +276,7 @@ impl Engine {
         search::execute(&snapshot, q, k, params)
     }
 
-    /// Same as `search` but with WAND pruning off. Results must match exactly; kept public for tests and benchmarks.
+    /// Same as `search` but with pruning off. Results must match exactly; kept public for tests and benchmarks.
     #[doc(hidden)]
     pub fn search_unpruned(&self, query: &str, k: usize) -> Result<Vec<Hit>> {
         let q = Query::parse(query, &self.shared.analyzer);

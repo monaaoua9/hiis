@@ -157,10 +157,15 @@ fn main() {
         }
         w.commit().unwrap();
         // merge down to one segment, like the hiis run
-        let ids = index.searchable_segment_ids().unwrap();
-        if ids.len() > 1 {
-            w.merge(&ids).wait().unwrap();
+        for _ in 0..50 {
+            let ids = index.searchable_segment_ids().unwrap();
+            if ids.len() <= 1 || w.merge(&ids).wait().is_ok() {
+                break;
+            }
+            // lost a race with a background merge, look again
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
+        w.garbage_collect_files().wait().unwrap();
         w.wait_merging_threads().unwrap();
         let secs = t.elapsed().as_secs_f64();
 

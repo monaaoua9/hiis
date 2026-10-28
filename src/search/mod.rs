@@ -166,7 +166,7 @@ fn lane_doc(l: &Lane) -> u32 {
     l.cur.doc().unwrap_or(u32::MAX)
 }
 
-/// WAND with block-max refinement. Same hits and bit-identical scores as the
+/// MaxScore (single terms also skip by block bound). Same hits and bit-identical scores as the
 /// exhaustive path: pruning only drops docs whose upper bound is *below* the
 /// current k-th score (ties are kept), and survivors are scored with the
 /// same formula, summed in query-clause order.

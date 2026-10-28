@@ -8,6 +8,9 @@
 * Per-document term grouping happens before the buffer lock is taken, so concurrent `add_document` calls only serialise on the hash-map merge and the WAL append. `bench` takes a thread count as second argument.
 * `Engine::add_documents`: batch ingest with a single WAL write and fsync; the CLI `index` command uses it.
 * `examples/eval.rs`: nDCG/MRR/recall on BEIR-format collections (SciFact nDCG@10 = 0.683).
+* Multi-term pruning is now MaxScore instead of WAND: 3.6x less query time on TREC-COVID, still bit-identical to exhaustive scoring.
+* Per-thread stem cache; `add_documents` analyses a batch across cores.
+* `bench-compare/`: side-by-side run against Tantivy.
 
 ## 0.1.0
 
