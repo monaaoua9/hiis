@@ -56,6 +56,23 @@ machine, so treat as order of magnitude): 3-9k docs/s ingest (run-to-run spread;
 down to one segment, 2-6 ms for single-term queries matching ~95% of docs,
 ~13-27 ms for a phrase over two such terms. WAND pruning on 2-3 term OR queries with a rare term: ~0.5 ms vs ~2-3.5 ms exhaustive (4-6x).
 
+## Ranking quality
+
+`examples/eval.rs` runs a BEIR-layout collection and reports nDCG@10, MRR@10
+and Recall@100. On SciFact (5,183 abstracts, 300 test queries, default
+analyzer, title + text indexed together):
+
+```
+nDCG@10 0.6827   MRR@10 0.6455   Recall@100 0.9276   p50 0.7 ms, p95 2.5 ms
+```
+
+For reference, the BEIR paper reports 0.665 (Elasticsearch BM25) and Anserini's
+flat BM25 baseline is about 0.679 on the same split.
+
+```
+cargo run --release --example eval -- path/to/scifact
+```
+
 ## Layout
 
 ```

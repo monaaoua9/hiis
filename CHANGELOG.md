@@ -7,6 +7,7 @@
 * Analyzer allocates once per token instead of three times (tokenizer no longer collects chars, stemmer takes the string by value).
 * Per-document term grouping happens before the buffer lock is taken, so concurrent `add_document` calls only serialise on the hash-map merge and the WAL append. `bench` takes a thread count as second argument.
 * `Engine::add_documents`: batch ingest with a single WAL write and fsync; the CLI `index` command uses it.
+* `examples/eval.rs`: nDCG/MRR/recall on BEIR-format collections (SciFact nDCG@10 = 0.683).
 
 ## 0.1.0
 
