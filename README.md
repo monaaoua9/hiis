@@ -54,7 +54,7 @@ convergence, concurrent indexing + searching, and the directory lock.
 `tests/robustness.rs` adds seeded randomised round-trips for every codec and posting list (checked against a naive model), garbage/mutation tests that fix the CRC so corrupt data reaches the decoders, orphan-file cleanup, and a real crash test that `kill`s the CLI mid-indexing five times and audits that the recovered index is a gap-free prefix with intact text.
 
 Sample bench run (synthetic skewed corpus, 100k docs, one noisy Windows
-machine, so treat as order of magnitude): 3-9k docs/s ingest (run-to-run spread; the WAL accounts for under 3% of it), 1.6-2.4 s to merge
+machine, so treat as order of magnitude): ~13k docs/s ingest (run-to-run spread; the WAL accounts for under 3% of it), 1.6-2.4 s to merge
 down to one segment, 2-6 ms for single-term queries matching ~95% of docs,
 ~13-27 ms for a phrase over two such terms. Pruning on multi-term OR queries: 3.6x less total time than exhaustive on TREC-COVID (see below).
 
