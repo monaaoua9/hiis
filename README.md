@@ -56,7 +56,7 @@ convergence, concurrent indexing + searching, and the directory lock.
 Sample bench run (synthetic skewed corpus, 100k docs, one noisy Windows
 machine, so treat as order of magnitude): ~13k docs/s ingest (run-to-run spread; the WAL accounts for under 3% of it), ~1.7 s to merge
 down to one segment, ~2.3 ms for single-term queries matching ~95% of docs,
-~9 ms for a phrase over two such terms. Pruning on multi-term OR queries: 3.6x less total time than exhaustive on TREC-COVID (see below).
+~9 ms for a phrase over two such terms. Pruning on multi-term OR queries: 3.6x less total time than exhaustive on TREC-COVID (see below). Three-run numbers, including pruned against exhaustive per query, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Ranking quality
 
