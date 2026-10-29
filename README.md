@@ -15,7 +15,7 @@ A full-text search storage engine in safe Rust, with no dependencies.
 * Exclusive directory lock; checksum-valid-but-corrupt segments give errors, not panics
 * Lock-free reads on `Arc` snapshots; crash-safe manifest (tmp + fsync + rename)
 
-Design details and diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Design details and diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The decisions and their trade-offs, shorter: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Use
 
