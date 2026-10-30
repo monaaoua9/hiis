@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* `Engine::for_each_document` and CLI `export` (JSON lines), `load`, `reindex <dir> <dest>` to rebuild an index with the current analyzer, for when analysis rules change.
 * `hiis serve`: std-only HTTP/1.1 + JSON API (`/api/v1/documents`, `search` with cursor pagination and snippets, `suggest`, `similar`, `explain`, `commit`, `stats`). Keep-alive, thread pool, optional bearer token, background commit so writes show up without calling commit. Embeddable as `hiis::server::Server`.
 * Arabic: light stemmer (article/clitic prefixes, plural and pronoun suffixes; `AnalyzerConfig::arabic_stem`) and an Arabic stopword list. **Terms change for Arabic text, so re-index existing Arabic content.** Autocomplete offers words without their article.
 * `Engine::similar` / `hiis similar`: more-like-this. The document becomes a weighted OR query of its 25 highest tf-idf terms (terms nobody else has are ignored), run through the normal pruned search.

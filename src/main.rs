@@ -1,9 +1,11 @@
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use hiis::json::Json;
 use hiis::server::{Server, ServerConfig};
 use hiis::{Config, Engine, HighlightOpts, Result};
 
@@ -21,6 +23,9 @@ usage:
   hiis backup <dir> <dest>        consistent copy of the committed index
   hiis serve  <dir> [--addr HOST:PORT] [--threads N] [--commit-ms N] [--token T]
                                   HTTP API; the token can also come from HIIS_TOKEN
+  hiis export <dir> [file]        live documents as JSON lines {id, text} (stdout by default)
+  hiis load   <dir> <file>        add documents from JSON lines (each needs a text field)
+  hiis reindex <dir> <dest>       rebuild into a fresh index with the current analyzer (ids restart at 0)
   hiis stats  <dir>";
 
 fn main() -> ExitCode {
@@ -165,6 +170,61 @@ fn run(args: &[String]) -> Result<()> {
             let server = Server::start(Arc::new(engine), cfg)?;
             eprintln!("listening on http://{}", server.local_addr());
             server.wait();
+        }
+        ("export", opts) => {
+            let mut out: Box<dyn Write> = match opts {
+                [] => Box::new(BufWriter::new(std::io::stdout().lock())),
+                [file] => Box::new(BufWriter::new(fs::File::create(file)?)),
+                _ => return Err(bad_usage()),
+            };
+            engine.for_each_document(|id, text| {
+                let line = Json::obj([("id", id.into()), ("text", text.into())]);
+                writeln!(out, "{line}")?;
+                Ok(())
+            })?;
+            out.flush()?;
+        }
+        ("load", [file]) => {
+            let raw = fs::read_to_string(file)?;
+            let t = Instant::now();
+            let mut batch: Vec<String> = Vec::new();
+            let mut n = 0usize;
+            for (i, line) in raw.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+                let doc =
+                    Json::parse(line).map_err(|e| hiis::Error::Invalid(format!("line {}: {e}", i + 1)))?;
+                let Some(text) = doc.get("text").and_then(Json::as_str) else {
+                    return Err(hiis::Error::Invalid(format!("line {}: no \"text\" string", i + 1)));
+                };
+                batch.push(text.to_string());
+                if batch.len() == 256 {
+                    engine.add_documents(&batch)?;
+                    n += batch.len();
+                    batch.clear();
+                }
+            }
+            engine.add_documents(&batch)?;
+            engine.commit()?;
+            println!("loaded {} docs in {:.2}s", n + batch.len(), t.elapsed().as_secs_f64());
+        }
+        ("reindex", [dest]) => {
+            let target = Engine::open(dest, Config::default())?;
+            if target.stats().live_docs > 0 {
+                return Err(hiis::Error::Invalid(format!("{dest} already holds documents")));
+            }
+            let mut batch: Vec<String> = Vec::new();
+            let mut n = 0usize;
+            engine.for_each_document(|_, text| {
+                batch.push(text.to_string());
+                if batch.len() == 256 {
+                    target.add_documents(&batch)?;
+                    n += batch.len();
+                    batch.clear();
+                }
+                Ok(())
+            })?;
+            target.add_documents(&batch)?;
+            target.commit()?;
+            println!("reindexed {} docs into {dest}", n + batch.len());
         }
         ("stats", []) => {
             let s = engine.stats();

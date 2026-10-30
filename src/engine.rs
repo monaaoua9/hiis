@@ -404,6 +404,26 @@ impl Engine {
         write_atomic(&dest.join(MANIFEST), manifest.as_bytes())
     }
 
+    /// Every live committed document in id order, text included. The callback returning an error
+    /// stops the walk. Works on a snapshot, so writes during the walk don't show up in it.
+    pub fn for_each_document(&self, mut f: impl FnMut(DocId, &str) -> Result<()>) -> Result<()> {
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        let mut order: Vec<(DocId, usize, u32)> = Vec::new();
+        for (si, seg) in snapshot.iter().enumerate() {
+            for local in (0..seg.n_docs()).filter(|&l| !seg.is_deleted(l)) {
+                order.push((seg.doc(local).ext_id, si, local));
+            }
+        }
+        order.sort_unstable();
+        for (id, si, local) in order {
+            let Some(text) = snapshot[si].text(local) else {
+                return Err(Error::Corrupt("stored text unreadable"));
+            };
+            f(id, &text)?;
+        }
+        Ok(())
+    }
+
     /// Merge everything into one segment, dropping deleted docs.
     pub fn force_merge(&self) -> Result<()> {
         self.commit()?;
