@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* `tests/compat.rs` with committed v4 and v5 index fixtures (`tests/fixtures`): old indexes must keep opening and answering, a merge upgrades v4 to v5, and a reindex (export, add into a fresh index) clears the `verify` complaints that analyzer changes leave on old content.
+
 * `examples/serve_bench.rs`: requests per second and latency percentiles for the HTTP search endpoint at a chosen client count; numbers in docs/BENCHMARKS.md.
 
 * Arabic stemmer: `-يات` feminine plurals and a bare alef tanween (قروضا) now meet their base form. Terms change, so run `hiis reindex` on existing Arabic content.
