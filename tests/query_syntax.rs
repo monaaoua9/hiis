@@ -87,3 +87,33 @@ fn fuzzy_survives_merge() {
     e.force_merge().unwrap();
     assert_eq!(before, e.search("lazzy~ brwn~", 10).unwrap());
 }
+
+#[test]
+fn proximity_queries() {
+    let dir = TmpDir::new();
+    let e = hiis::Engine::open(&dir.0, small_cfg()).unwrap();
+    e.add_document("alpha beta gamma").unwrap(); // 0
+    e.add_document("alpha x y beta").unwrap(); // 1
+    e.add_document("beta alpha").unwrap(); // 2
+    e.add_document("alpha x y z w beta").unwrap(); // 3
+    e.commit().unwrap();
+
+    assert_eq!(sorted_ids(&e.search("\"alpha beta\"~0", 10).unwrap()), [0]);
+    assert_eq!(sorted_ids(&e.search("\"alpha beta\"~2", 10).unwrap()), [0, 1, 2]);
+    assert_eq!(sorted_ids(&e.search("\"alpha beta\"~4", 10).unwrap()), [0, 1, 2, 3]);
+    assert_eq!(sorted_ids(&e.search("\"alpha beta\"~1", 10).unwrap()), [0]);
+    assert_eq!(sorted_ids(&e.search("+\"alpha beta\"~2 -gamma", 10).unwrap()), [1, 2]);
+}
+
+#[test]
+fn proximity_ranks_tighter_matches_higher() {
+    let dir = TmpDir::new();
+    let e = hiis::Engine::open(&dir.0, small_cfg()).unwrap();
+    e.add_document("red fox").unwrap();
+    e.add_document("red x x fox").unwrap();
+    e.add_document("filler words here to pad this one out a bit more").unwrap();
+    e.commit().unwrap();
+    let hits = e.search("\"red fox\"~3", 10).unwrap();
+    assert_eq!(sorted_ids(&hits), [0, 1]);
+    assert_eq!(hits[0].doc_id, 0);
+}

@@ -12,6 +12,7 @@
 //! rust NOT java        same as -java
 //! serch~               fuzzy: indexed terms within 1-2 edits (by word length), same first letter
 //! serch~1              fuzzy with an explicit distance, 0 to 2
+//! "quick fox"~3        proximity: the words within 3 positions of a phrase match, any order
 //! ```
 //!
 //! AND / OR / NOT only count in capitals, lowercase `and` is a stopword like
@@ -37,6 +38,8 @@ pub enum Clause {
     Phrase(Vec<(String, u32)>),
     // analysed term, max edits
     Fuzzy(String, u32),
+    // phrase with slop: same shape as Phrase, plus how far the words may drift
+    Near(Vec<(String, u32)>, u32),
     Group(Query),
 }
 
@@ -72,7 +75,7 @@ impl Query {
         let mut out: Vec<&str> = Vec::new();
         self.visit(&mut |c| match c {
             Clause::Term(t) => out.push(t),
-            Clause::Phrase(p) => out.extend(p.iter().map(|x| x.0.as_str())),
+            Clause::Phrase(p) | Clause::Near(p, _) => out.extend(p.iter().map(|x| x.0.as_str())),
             _ => {}
         });
         out.sort_unstable();
@@ -83,6 +86,7 @@ impl Query {
 
 // deeper than this and the rest is read as plain text, so "((((((..." can't blow the stack
 const MAX_DEPTH: usize = 16;
+const MAX_SLOP: u32 = 1000;
 
 // "word~" or "word~2"; the number is clamped to what fuzzy matching supports
 fn split_fuzzy(text: &str) -> Option<(&str, Option<u32>)> {
@@ -141,6 +145,16 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
             let text: String = chars[s..*i].iter().collect();
             *i = (*i + 1).min(chars.len());
 
+            let mut slop = 0u32;
+            if chars.get(*i) == Some(&'~') {
+                let digits = chars[*i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+                if digits > 0 {
+                    let n: String = chars[*i + 1..*i + 1 + digits].iter().collect();
+                    slop = n.parse::<u32>().unwrap_or(MAX_SLOP).min(MAX_SLOP);
+                    *i += 1 + digits;
+                }
+            }
+
             let toks = an.analyze(&text);
             match toks.len() {
                 0 => {}
@@ -148,7 +162,8 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
                 _ => {
                     let first = toks[0].position;
                     let parts = toks.into_iter().map(|t| (t.term, t.position - first)).collect();
-                    clauses.push(QueryClause { occur, clause: Clause::Phrase(parts) });
+                    let clause = if slop == 0 { Clause::Phrase(parts) } else { Clause::Near(parts, slop) };
+                    clauses.push(QueryClause { occur, clause });
                 }
             }
         } else {
@@ -324,6 +339,22 @@ mod tests {
         // not fuzzy: no word, or junk after the tilde
         assert!(parse("~").clauses.is_empty());
         assert_eq!(parse("fox~bar").clauses.len(), 2);
+    }
+
+    #[test]
+    fn slop_after_the_closing_quote() {
+        let q = parse("\"quick brown fox\"~4 +\"quick fox\"~0");
+        assert_eq!(
+            q.clauses[0].clause,
+            Clause::Near(vec![("quick".into(), 0), ("brown".into(), 1), ("fox".into(), 2)], 4)
+        );
+        // ~0 is an ordinary phrase
+        assert!(matches!(q.clauses[1].clause, Clause::Phrase(_)));
+        // a one-word "phrase" with slop is still a term
+        assert_eq!(parse("\"fox\"~3").clauses, [term(Occur::Should, "fox")]);
+        // tilde without digits isn't slop
+        assert_eq!(parse("\"quick fox\"~").clauses.len(), 1);
+        assert_eq!(parse("\"quick fox\"~99999999999999999999").clauses.len(), 1);
     }
 
     #[test]

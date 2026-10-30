@@ -329,7 +329,8 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
                 }
                 union(lists)
             }
-            Clause::Phrase(p) => eval_phrase(seg, &dels, p, ctx)?,
+            Clause::Phrase(p) => eval_phrase(seg, &dels, p, None, ctx)?,
+            Clause::Near(p, slop) => eval_phrase(seg, &dels, p, Some(*slop), ctx)?,
             Clause::Fuzzy(t, d) => {
                 let mut lists = Vec::new();
                 for (v, w) in &ctx.fuzzy[&(t.clone(), *d)] {
@@ -391,7 +392,13 @@ fn eval_term(seg: &Segment, dels: &[u64], term: &str, ctx: &Ctx) -> Result<Score
     Ok(out)
 }
 
-fn eval_phrase(seg: &Segment, dels: &[u64], parts: &[(String, u32)], ctx: &Ctx) -> Result<Scored> {
+fn eval_phrase(
+    seg: &Segment,
+    dels: &[u64],
+    parts: &[(String, u32)],
+    slop: Option<u32>,
+    ctx: &Ctx,
+) -> Result<Scored> {
     let mut curs = Vec::with_capacity(parts.len());
     for (t, _) in parts {
         match seg.term(t) {
@@ -426,7 +433,10 @@ fn eval_phrase(seg: &Segment, dels: &[u64], parts: &[(String, u32)], ctx: &Ctx) 
             for (i, c) in curs.iter_mut().enumerate() {
                 c.positions(&mut pos[i])?;
             }
-            let n = phrase_freq(&pos, parts);
+            let n = match slop {
+                None => phrase_freq(&pos, parts),
+                Some(s) => near_freq(&pos, parts, s),
+            };
             if n > 0 {
                 let s = ctx.bm25.score(idf, n as f32, seg.doc(d).len as f32, ctx.avg_len);
                 out.push((d, s));
@@ -451,6 +461,43 @@ fn phrase_freq(pos: &[Vec<u32>], parts: &[(String, u32)]) -> u32 {
             }
         }
         n += 1;
+    }
+    n
+}
+
+// Slide a window over every word's positions shifted back by its offset in the phrase.
+// A phrase hit is a window of width 0; swapping two neighbours costs 2, like in Lucene.
+// Each hit uses up the positions it covered, so overlapping windows aren't double counted.
+fn near_freq(pos: &[Vec<u32>], parts: &[(String, u32)], slop: u32) -> u32 {
+    let mut ev: Vec<(i64, usize)> = Vec::new();
+    for (i, list) in pos.iter().enumerate() {
+        let off = parts[i].1 as i64;
+        ev.extend(list.iter().map(|&p| (p as i64 - off, i)));
+    }
+    ev.sort_unstable();
+
+    let mut have = vec![0u32; parts.len()];
+    let mut covered = 0;
+    let (mut lo, mut n) = (0, 0);
+    for hi in 0..ev.len() {
+        if have[ev[hi].1] == 0 {
+            covered += 1;
+        }
+        have[ev[hi].1] += 1;
+
+        while ev[hi].0 - ev[lo].0 > slop as i64 {
+            have[ev[lo].1] -= 1;
+            if have[ev[lo].1] == 0 {
+                covered -= 1;
+            }
+            lo += 1;
+        }
+        if covered == parts.len() {
+            n += 1;
+            have.iter_mut().for_each(|h| *h = 0);
+            covered = 0;
+            lo = hi + 1;
+        }
     }
     n
 }
@@ -534,6 +581,27 @@ mod tests {
         let b = Hit { doc_id: 1, score: 2.0 };
         let c = Hit { doc_id: 9, score: 3.0 };
         assert!(c > b && b > a);
+    }
+
+    #[test]
+    fn near_windows() {
+        let parts = vec![("a".to_string(), 0), ("b".to_string(), 1)];
+        // a@3 b@4 is exact; a@10 b@12 needs slop 1; b@20 a@21 is swapped (cost 2)
+        let pos = vec![vec![3, 10, 21], vec![4, 12, 20]];
+        assert_eq!(near_freq(&pos, &parts, 0), 1);
+        assert_eq!(near_freq(&pos, &parts, 1), 2);
+        assert_eq!(near_freq(&pos, &parts, 2), 3);
+        assert_eq!(near_freq(&pos, &parts, 100), 3);
+        assert_eq!(near_freq(&[vec![1], vec![]], &parts, 100), 0);
+    }
+
+    #[test]
+    fn near_with_stopword_gap() {
+        // "state of the art": art sits 3 after state
+        let parts = vec![("state".to_string(), 0), ("art".to_string(), 3)];
+        assert_eq!(near_freq(&[vec![5], vec![8]], &parts, 0), 1);
+        assert_eq!(near_freq(&[vec![5], vec![9]], &parts, 0), 0);
+        assert_eq!(near_freq(&[vec![5], vec![9]], &parts, 1), 1);
     }
 
     #[test]
