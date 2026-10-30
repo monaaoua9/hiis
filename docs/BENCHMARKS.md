@@ -27,6 +27,21 @@ A synthetic skewed corpus of 100,000 documents (20,000 distinct terms, 67.0 MB o
 
 Ingest is 1-4% slower in every pair (7,662 vs 7,733; 6,005 vs 6,261; 5,905 vs 6,086): each document now goes through the fielded-document check and carries a per-field length list. That is small but it showed up in all three pairs, so I'm reporting it as real. Merge times swing too much between runs (2.4 - 6.0 s) to say anything. The format v5 field section costs about a byte per plain document.
 
+## Analyzer (CPU only)
+
+```
+cargo run --release --example analyze_bench -- 20000 5
+```
+
+The analyzer alone, 20,000 documents, best of 5 inside a run; four runs interleaved old build / new build, median with min-max of the four. The new build skips per-character Unicode checks for ASCII tokens (only the apostrophe can change in ASCII) and looks a word up only in the stopword list of its own script. The regression above (1-4% on ingest) came from the Arabic stopword check and the Arabic detection I had added to every token, so this is that cost taken back plus a bit more.
+
+| corpus | before | after | change per pair |
+|---|---:|---:|---|
+| synthetic `w123x45` words | 518 ms (466 - 561) | 346 ms (341 - 426) | 24-37% less time, all four pairs |
+| words from `data/sample.txt` (English + Arabic) | 783 ms (753 - 925) | 720 ms (662 - 838) | 4-15% less time, all four pairs |
+
+The analyzer is about a tenth of ingest time (1.6 M tokens take about 0.35 s here, against roughly 15 s to ingest 100,000 documents on this machine), so expect a few percent end to end, not the 30% above. I did not re-measure full ingest: on this machine it moves by more than that between runs, so I'd have no way to show a 3% change.
+
 ## Queries that existed before
 
 Latency in µs, MaxScore pruning against exhaustive scoring on the same index.

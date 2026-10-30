@@ -70,10 +70,15 @@ impl Analyzer {
         {
             folded.truncate(n);
         }
-        if folded.chars().any(|c| fold_char(c) != Some(c)) {
+        // in ascii only the apostrophe is ever dropped
+        let ascii = folded.is_ascii();
+        let needs_fold =
+            if ascii { folded.contains('\'') } else { folded.chars().any(|c| fold_char(c) != Some(c)) };
+        if needs_fold {
             folded = folded.chars().filter_map(fold_char).collect();
         }
-        if folded.is_empty() || folded.chars().count() > self.cfg.max_token_chars {
+        let n_chars = if ascii { folded.len() } else { folded.chars().count() };
+        if folded.is_empty() || n_chars > self.cfg.max_token_chars {
             return None;
         }
         if self.cfg.remove_stopwords && stopwords::is_stopword(&folded) {

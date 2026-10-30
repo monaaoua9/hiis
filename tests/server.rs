@@ -273,7 +273,9 @@ fn malformed_requests_dont_hurt() {
     // the server may reset the connection before we read the 431 (unread request data), either is fine
     let mut buf = Vec::new();
     let _ = c.read_to_end(&mut buf);
-    assert!(buf.is_empty() || String::from_utf8_lossy(&buf).contains("431"));
+    // a reset mid-response can also leave a truncated status line
+    let head = String::from_utf8_lossy(&buf);
+    assert!(head.starts_with("HTTP/1.1 431") || "HTTP/1.1 431".starts_with(&*head), "{head:?}");
     assert_eq!(call(&srv, "GET", "/health", "").status, 200);
 }
 

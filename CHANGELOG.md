@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* Analyzer: ASCII tokens skip the per-character fold and length scan, and stopword lookup only searches the list for the word's script. Same output, 24-37% less analyzer time on ASCII-heavy text (see docs/BENCHMARKS.md); `examples/analyze_bench.rs` measures it.
+
 * `tests/compat.rs` with committed v4 and v5 index fixtures (`tests/fixtures`): old indexes must keep opening and answering, a merge upgrades v4 to v5, and a reindex (export, add into a fresh index) clears the `verify` complaints that analyzer changes leave on old content.
 
 * `examples/serve_bench.rs`: requests per second and latency percentiles for the HTTP search endpoint at a chosen client count; numbers in docs/BENCHMARKS.md.

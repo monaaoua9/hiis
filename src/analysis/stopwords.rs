@@ -69,7 +69,12 @@ const ARABIC: &[&str] = &[
 ];
 
 pub fn is_stopword(w: &str) -> bool {
-    ENGLISH.binary_search(&w).is_ok() || ARABIC.binary_search(&w).is_ok()
+    // the English list is all ascii and the Arabic one never is
+    if w.is_ascii() {
+        ENGLISH.binary_search(&w).is_ok()
+    } else {
+        ARABIC.binary_search(&w).is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +85,13 @@ mod tests {
     fn lists_are_sorted() {
         assert!(ENGLISH.windows(2).all(|w| w[0] < w[1]));
         assert!(ARABIC.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn lists_stay_in_their_script() {
+        // is_stopword only looks in the list that matches the word's script
+        assert!(ENGLISH.iter().all(|w| w.is_ascii()));
+        assert!(ARABIC.iter().all(|w| !w.is_ascii()));
     }
 
     #[test]
