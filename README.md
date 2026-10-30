@@ -20,6 +20,21 @@ A full-text search storage engine in safe Rust, with no dependencies.
 * Exclusive directory lock; checksum-valid-but-corrupt segments give errors, not panics
 * Lock-free reads on `Arc` snapshots; crash-safe manifest (tmp + fsync + rename)
 
+A first look (`**` marks what the terminal prints in bold):
+
+```
+$ hiis index ./idx data/sample.txt
+$ hiis search ./idx "postng~ compres*" -k 2
+ 1.   3.634  #3      **Posting** lists are **compressed** with frame of reference encoding
+ 2.   1.146  #7      …need term positions stored in the **posting** lists
+-- 2 hits in 263us
+
+$ hiis explain ./idx "posting lists" 3
+doc 3 scores 3.5911
+   post  1.7956  [idf 1.649, tf 1, len 6 (avg 7.5), k1 1.2 b 0.75; bm25 1.7956]
+   list  1.7956  [idf 1.649, tf 1, len 6 (avg 7.5), k1 1.2 b 0.75; bm25 1.7956]
+```
+
 Design details and diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The decisions and their trade-offs, shorter: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Use
