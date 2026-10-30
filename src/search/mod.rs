@@ -49,6 +49,8 @@ impl Ord for Hit {
 struct Ctx {
     bm25: Bm25,
     avg_len: f32,
+    // field -> average tokens per doc that has the field
+    field_avg: HashMap<String, f32>,
     idf: HashMap<String, f32>,
     // prefix -> the indexed terms it stands for (same list for every segment, so idf is consistent)
     expand: HashMap<String, Vec<String>>,
@@ -56,6 +58,19 @@ struct Ctx {
     fuzzy: HashMap<(String, u32), Vec<(String, f32)>>,
     // pagination: hits that rank at or above this one were already served
     after: Option<Hit>,
+}
+
+impl Ctx {
+    // (length, average length) BM25 should use for `term` in doc `local`: a field term
+    // is normalised by the length of its field, everything else by the whole document
+    fn len_avg(&self, seg: &Segment, local: u32, term: &str) -> (f32, f32) {
+        if let Some((f, _)) = term.split_once(':') {
+            if let (Some(l), Some(a)) = (seg.field_len(local, f), self.field_avg.get(f)) {
+                return (l as f32, *a);
+            }
+        }
+        (seg.doc(local).len as f32, self.avg_len)
+    }
 }
 
 type Scored = Vec<(u32, f32)>;
@@ -155,7 +170,24 @@ fn build_ctx(segments: &[Arc<Segment>], q: &Query, bm25: Bm25) -> Option<Ctx> {
         let df: u64 = segments.iter().filter_map(|s| s.term(t)).map(|e| e.doc_freq as u64).sum();
         idf.insert(t.to_string(), Bm25::idf(n_docs, df));
     }
-    Some(Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand, fuzzy: fuzzy_map, after: None })
+    let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+    for seg in segments {
+        for (f, (t, d)) in seg.field_totals() {
+            let e = totals.entry(f).or_default();
+            e.0 += t;
+            e.1 += d;
+        }
+    }
+    let field_avg = totals.into_iter().map(|(f, (t, d))| (f, t as f32 / d.max(1) as f32)).collect();
+    Some(Ctx {
+        bm25,
+        avg_len: total_len as f32 / n_docs as f32,
+        field_avg,
+        idf,
+        expand,
+        fuzzy: fuzzy_map,
+        after: None,
+    })
 }
 
 // a prefix like "a*" would otherwise drag in half the dictionary; first terms in
@@ -223,6 +255,7 @@ fn pure_disjunction(q: &Query) -> Option<Vec<(&str, f32)>> {
 const SLACK: f32 = 1.0001;
 
 struct Lane<'a> {
+    term: &'a str,
     cur: PostingsCursor<'a>,
     idf: f32,
     boost: f32,
@@ -256,7 +289,7 @@ fn wand_segment(
         }
         let idf = ctx.idf[*t];
         let ub = ctx.bm25.upper_bound(idf, cur.max_tf()) * boost;
-        lanes.push(Lane { cur, idf, boost: *boost, ub, order });
+        lanes.push(Lane { term: t, cur, idf, boost: *boost, ub, order });
     }
 
     // one term: no pivoting needed, just skip blocks that can't reach the top-k
@@ -272,8 +305,8 @@ fn wand_segment(
                 }
             }
             if !bit_set(&dels, d) {
-                let dl = seg.doc(d).len as f32;
-                let score = ctx.bm25.score(lane.idf, lane.cur.freq() as f32, dl, ctx.avg_len) * lane.boost;
+                let (dl, avg) = ctx.len_avg(seg, d, lane.term);
+                let score = ctx.bm25.score(lane.idf, lane.cur.freq() as f32, dl, avg) * lane.boost;
                 offer(heap, k, ctx.after, Hit { doc_id: seg.doc(d).ext_id, score });
             }
             cur_doc = lane.cur.next()?;
@@ -310,10 +343,10 @@ fn wand_segment(
         parts.clear();
         let mut sum = 0.0f32;
         if !bit_set(&dels, d) {
-            let dl = seg.doc(d).len as f32;
             for l in &lanes[ne..] {
                 if lane_doc(l) == d {
-                    let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len) * l.boost;
+                    let (dl, avg) = ctx.len_avg(seg, d, l.term);
+                    let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, avg) * l.boost;
                     parts.push((l.order, sc));
                     sum += sc;
                 }
@@ -323,7 +356,8 @@ fn wand_segment(
             if (sum + rest) * SLACK >= theta {
                 for l in lanes[..ne].iter_mut().rev() {
                     if l.cur.advance(d)? == Some(d) {
-                        let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len) * l.boost;
+                        let (dl, avg) = ctx.len_avg(seg, d, l.term);
+                        let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, avg) * l.boost;
                         parts.push((l.order, sc));
                         sum += sc;
                     }
@@ -435,7 +469,8 @@ fn eval_term(seg: &Segment, dels: &[u64], term: &str, ctx: &Ctx) -> Result<Score
         if bit_set(dels, doc) {
             continue;
         }
-        let s = ctx.bm25.score(idf, cur.freq() as f32, seg.doc(doc).len as f32, ctx.avg_len);
+        let (dl, avg) = ctx.len_avg(seg, doc, term);
+        let s = ctx.bm25.score(idf, cur.freq() as f32, dl, avg);
         out.push((doc, s));
     }
     Ok(out)
@@ -487,7 +522,8 @@ fn eval_phrase(
                 Some(s) => near_freq(&pos, parts, s),
             };
             if n > 0 {
-                let s = ctx.bm25.score(idf, n as f32, seg.doc(d).len as f32, ctx.avg_len);
+                let (dl, avg) = ctx.len_avg(seg, d, &parts[0].0);
+                let s = ctx.bm25.score(idf, n as f32, dl, avg);
                 out.push((d, s));
             }
         }

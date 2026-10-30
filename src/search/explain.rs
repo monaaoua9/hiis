@@ -122,11 +122,12 @@ fn note(seg: &Segment, local: u32, qc: &QueryClause, score: Option<f32>, ctx: &C
     if cur.advance(local)? != Some(local) {
         return Ok(String::new());
     }
-    let (idf, tf, dl) = (ctx.idf[t.as_str()], cur.freq(), seg.doc(local).len);
-    let raw = ctx.bm25.score(idf, tf as f32, dl as f32, ctx.avg_len);
+    let (idf, tf) = (ctx.idf[t.as_str()], cur.freq());
+    let (dl, avg) = ctx.len_avg(seg, local, t);
+    let raw = ctx.bm25.score(idf, tf as f32, dl, avg);
     Ok(format!(
-        "idf {idf:.3}, tf {tf}, doc len {dl} (avg {:.1}), k1 {} b {}; bm25 {raw:.4}",
-        ctx.avg_len, ctx.bm25.k1, ctx.bm25.b
+        "idf {idf:.3}, tf {tf}, len {dl} (avg {avg:.1}), k1 {} b {}; bm25 {raw:.4}",
+        ctx.bm25.k1, ctx.bm25.b
     ))
 }
 

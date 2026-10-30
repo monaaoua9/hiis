@@ -107,8 +107,9 @@ A fielded document is stored as ` name  value` records and indexed twice over:
 its plain term (so unfielded queries see all the text, exactly as before) and under `name:term`. The
 parser rewrites `title:x` clauses to those terms. Plain prefix / fuzzy expansion skips terms with a colon
 and field queries only look at them. Positions restart per field with a gap of 50, so phrases and
-proximity don't cross fields. BM25 uses whole-document length for field terms too, and the length
-counted in the segment is the plain-token one, which keeps `verify` consistent. `Segment::text` hands
+proximity don't cross fields. The doc table also carries tokens per field (format v5), so a field term is
+normalised by its field's length and the field's live average; the document length stays the plain-token
+count, which keeps `verify` consistent. `Segment::text` hands
 readers the values joined by newlines; merges copy the raw bytes.
 
 ## Known limits (deliberate scope)

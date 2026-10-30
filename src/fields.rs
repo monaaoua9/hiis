@@ -89,11 +89,16 @@ pub fn index(an: &Analyzer, raw: &str) -> Grouped {
         return SegmentBuilder::group(an.analyze(raw));
     };
 
+    let mut flens: Vec<(String, u32)> = Vec::new();
     let mut tokens: Vec<Token> = Vec::new();
     let mut extra: Vec<Token> = Vec::new();
     let mut base = 0;
     for (name, value) in fields {
         let part = an.analyze(value);
+        match flens.iter_mut().find(|(n, _)| n == name) {
+            Some(f) => f.1 += part.len() as u32,
+            None => flens.push((name.to_string(), part.len() as u32)),
+        }
         let next = part.last().map_or(base, |t| base + t.position + 1 + FIELD_GAP);
         for t in part {
             let position = base + t.position;
@@ -104,7 +109,7 @@ pub fn index(an: &Analyzer, raw: &str) -> Grouped {
     }
     let n = tokens.len() as u32;
     tokens.extend(extra);
-    SegmentBuilder::group_counted(tokens, n)
+    SegmentBuilder::group_counted(tokens, n).with_field_lens(flens)
 }
 
 #[cfg(test)]

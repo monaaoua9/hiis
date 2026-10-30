@@ -85,7 +85,7 @@ impl MergePolicy {
 pub fn merge_segments(sources: &[Arc<Segment>], deleted: &[Vec<u64>], out: &Path) -> Result<()> {
     const GONE: u32 = u32::MAX;
 
-    let mut docs: Vec<(u64, u32, u32)> = Vec::new();
+    let mut docs: Vec<(u64, u32, u32, Vec<(String, u32)>)> = Vec::new();
     let mut survivors: Vec<(usize, u32)> = Vec::new();
     let mut remap: Vec<Vec<u32>> = Vec::with_capacity(sources.len());
 
@@ -97,7 +97,7 @@ pub fn merge_segments(sources: &[Arc<Segment>], deleted: &[Vec<u64>], out: &Path
             }
             let d = seg.doc(local);
             map[local as usize] = docs.len() as u32;
-            docs.push((d.ext_id, d.len, d.text_len));
+            docs.push((d.ext_id, d.len, d.text_len, d.flens.clone()));
             survivors.push((si, local));
         }
         remap.push(map);

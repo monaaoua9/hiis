@@ -2,8 +2,9 @@
 
 ## Unreleased
 
+* Per-field BM25 length normalisation: segment format v5 stores each document's token count per field, and `title:x` is normalised by title length and the average title length. v4 segments still open (they fall back to whole-document length); merges rewrite them as v5. Deletes keep the per-field averages live.
 * `Engine::searcher()`: frozen view of the committed segments (search, search_page, count, get) so pagination stays consistent across commits and merges. Later deletes still show.
-* Named fields: `Engine::add_fields`, `title:fox`, `body:"a b"`, `title:(a OR b)`, `title:fox^3`. Field terms are extra postings (`title:fox`) next to the ordinary ones, so unfielded queries are unchanged and the segment format stays v4. Document length is whole-document, not per field. HTTP `{"fields": {..}}`, export/load/reindex keep fields.
+* Named fields: `Engine::add_fields`, `title:fox`, `body:"a b"`, `title:(a OR b)`, `title:fox^3`. Field terms are extra postings (`title:fox`) next to the ordinary ones, so unfielded queries are unchanged and the segment format stays v4. HTTP `{"fields": {..}}`, export/load/reindex keep fields.
 * `hiis serve --read-only` serves an existing index without taking the write lock.
 * `Config::read_only`: open an index for searching only. Shared lock so several readers can use one directory, nothing on disk is created or removed, the log is ignored, writes return an error.
 * `Engine::top_terms` / `hiis terms`: most widespread indexed terms.

@@ -7,7 +7,8 @@
 //! store          document text, cut into 8 KiB blocks and LZ-compressed
 //! docs           per doc: ext_id, token_len, text_off, text_len    (vbyte fields;
 //!                offsets are into the uncompressed text stream), then the block
-//!                table: total_len, n_blocks, compressed length of each block
+//!                table: total_len, n_blocks, compressed length of each block,
+//!                then (v5) field lengths: n_names, names, per doc n pairs of (name, tokens)
 //! footer   48B   n_docs u32 | n_terms u32 | 4 x u64 section offsets | crc32 of everything before | "SIIH"
 //! ```
 //!
@@ -24,7 +25,7 @@ use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use crate::codec::{crc32, lz, vbyte};
 use crate::error::{Error, Result};
@@ -33,7 +34,7 @@ use crate::index::DocId;
 
 const MAGIC: &[u8; 4] = b"HIIS";
 const END_MAGIC: &[u8; 4] = b"SIIH";
-const VERSION: u32 = 4; // 4: compressed text store; 3: counts in the footer; 2: per-block max_tf
+const VERSION: u32 = 5; // 5: per-field token counts (v4 still opens); 4: compressed text store; 3: counts in the footer; 2: per-block max_tf
 const HEADER_LEN: usize = 8;
 const FOOTER_LEN: usize = 48;
 const BLOCK: usize = 8 << 10;
@@ -66,6 +67,8 @@ pub struct DocEntry {
     pub len: u32,
     pub(crate) text_off: u64,
     pub(crate) text_len: u32,
+    /// tokens per named field, empty for plain documents
+    pub flens: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +94,12 @@ impl SegmentWriter {
     }
 
     pub fn add_doc(&mut self, ext_id: DocId, len: u32, text: &str) {
+        self.add_doc_fields(ext_id, len, Vec::new(), text);
+    }
+
+    pub fn add_doc_fields(&mut self, ext_id: DocId, len: u32, flens: Vec<(String, u32)>, text: &str) {
         self.docs.push(DocEntry {
+            flens,
             ext_id,
             len,
             text_off: self.store.len() as u64,
@@ -143,6 +151,7 @@ impl SegmentWriter {
         let docs_off = out.len() as u64;
         let table = self.docs.iter().map(|d| (d.ext_id, d.len, d.text_off, d.text_len));
         write_doc_table(&mut out, table, self.store.len() as u64, &clens);
+        write_field_section(&mut out, self.docs.iter().map(|d| d.flens.as_slice()));
 
         out.extend_from_slice(&(self.docs.len() as u32).to_le_bytes());
         out.extend_from_slice(&(self.terms.len() as u32).to_le_bytes());
@@ -172,6 +181,24 @@ fn write_doc_table(
     vbyte::write_u32(out, clens.len() as u32);
     for &c in clens {
         vbyte::write_u32(out, c);
+    }
+}
+
+fn write_field_section<'a>(out: &mut Vec<u8>, docs: impl Iterator<Item = &'a [(String, u32)]> + Clone) {
+    let mut names: Vec<&str> = docs.clone().flatten().map(|(n, _)| n.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    vbyte::write_u32(out, names.len() as u32);
+    for n in &names {
+        vbyte::write_u32(out, n.len() as u32);
+        out.extend_from_slice(n.as_bytes());
+    }
+    for d in docs {
+        vbyte::write_u32(out, d.len() as u32);
+        for (n, l) in d {
+            vbyte::write_u32(out, names.binary_search(&n.as_str()).unwrap() as u32);
+            vbyte::write_u32(out, *l);
+        }
     }
 }
 
@@ -266,6 +293,8 @@ pub struct Segment {
     terms: Vec<TermEntry>,
     docs: Vec<DocEntry>,
     by_ext: HashMap<DocId, u32>,
+    // field -> (tokens, docs that have it), over the live docs
+    field_totals: Mutex<HashMap<String, (u64, u64)>>,
     deleted: RwLock<Deleted>,
     live_len: AtomicU64,
     del_dirty: AtomicBool,
@@ -293,7 +322,8 @@ impl Segment {
         if &head[..4] != MAGIC {
             return Err(Error::Corrupt("bad segment magic"));
         }
-        if rd_u32(&head, 4) != VERSION {
+        let version = rd_u32(&head, 4);
+        if version != VERSION && version != 4 {
             return Err(Error::Corrupt("unsupported segment version"));
         }
         let foot_at = size - FOOTER_LEN;
@@ -371,18 +401,51 @@ impl Segment {
         if at != docs_off - store_off {
             return Err(Error::Corrupt("text block table disagrees with store size"));
         }
+
+        let mut flens: Vec<Vec<(String, u32)>> = vec![Vec::new(); n_docs];
+        if version >= 5 {
+            let n_names = vbyte::read_u32(&dsec, &mut p)? as usize;
+            if n_names > dsec.len() {
+                return Err(Error::Corrupt("field name count"));
+            }
+            let mut names = Vec::with_capacity(n_names);
+            for _ in 0..n_names {
+                let l = vbyte::read_u32(&dsec, &mut p)? as usize;
+                let b = p.checked_add(l).and_then(|e| dsec.get(p..e)).ok_or(Error::Corrupt("field name"))?;
+                names.push(String::from_utf8(b.to_vec()).map_err(|_| Error::Corrupt("field name utf8"))?);
+                p += l;
+            }
+            for slot in flens.iter_mut() {
+                let n = vbyte::read_u32(&dsec, &mut p)? as usize;
+                if n > n_names {
+                    return Err(Error::Corrupt("field pair count"));
+                }
+                for _ in 0..n {
+                    let i = vbyte::read_u32(&dsec, &mut p)? as usize;
+                    let l = vbyte::read_u32(&dsec, &mut p)?;
+                    let name = names.get(i).ok_or(Error::Corrupt("field index"))?;
+                    slot.push((name.clone(), l));
+                }
+            }
+        }
         drop(dsec);
 
+        let mut field_totals: HashMap<String, (u64, u64)> = HashMap::new();
         let mut docs = Vec::with_capacity(raw_docs.len());
         let mut by_ext = HashMap::with_capacity(raw_docs.len());
         let mut total_len = 0u64;
-        for (i, (ext_id, len, text_off, text_len)) in raw_docs.into_iter().enumerate() {
+        for (i, ((ext_id, len, text_off, text_len), flens)) in raw_docs.into_iter().zip(flens).enumerate() {
             if text_off.checked_add(text_len as u64).is_none_or(|e| e > store_len as u64) {
                 return Err(Error::Corrupt("doc text out of range"));
             }
             total_len += len as u64;
             by_ext.insert(ext_id, i as u32);
-            docs.push(DocEntry { ext_id, len, text_off, text_len });
+            for (n, l) in &flens {
+                let t = field_totals.entry(n.clone()).or_default();
+                t.0 += *l as u64;
+                t.1 += 1;
+            }
+            docs.push(DocEntry { ext_id, len, text_off, text_len, flens });
         }
 
         Ok(Segment {
@@ -396,6 +459,7 @@ impl Segment {
             terms,
             docs,
             by_ext,
+            field_totals: Mutex::new(field_totals),
             deleted: RwLock::new(Deleted { bits: vec![0; n_docs.div_ceil(64)], count: 0 }),
             live_len: AtomicU64::new(total_len),
             del_dirty: AtomicBool::new(false),
@@ -470,6 +534,16 @@ impl Segment {
         d.bits[w] |= 1 << b;
         d.count += 1;
         self.live_len.fetch_sub(self.docs[local as usize].len as u64, Ordering::Relaxed);
+        let flens = &self.docs[local as usize].flens;
+        if !flens.is_empty() {
+            let mut t = self.field_totals.lock().unwrap();
+            for (n, l) in flens {
+                if let Some(e) = t.get_mut(n) {
+                    e.0 -= *l as u64;
+                    e.1 -= 1;
+                }
+            }
+        }
         self.del_dirty.store(true, Ordering::Release);
         true
     }
@@ -512,6 +586,15 @@ impl Segment {
 
     pub fn deleted_snapshot(&self) -> Vec<u64> {
         self.deleted.read().unwrap().bits.clone()
+    }
+
+    /// Tokens `local` has in a named field (None when it has none, or the segment predates field lengths).
+    pub fn field_len(&self, local: u32, field: &str) -> Option<u32> {
+        self.docs[local as usize].flens.iter().find(|(n, _)| n == field).map(|x| x.1)
+    }
+
+    pub fn field_totals(&self) -> HashMap<String, (u64, u64)> {
+        self.field_totals.lock().unwrap().clone()
     }
 
     pub fn doc(&self, local: u32) -> &DocEntry {
@@ -647,11 +730,11 @@ impl StreamWriter {
         self.put(&p.bytes)
     }
 
-    /// `docs` is (ext_id, token_len, text_len) per doc; `text(i)` returns the
+    /// `docs` is (ext_id, token_len, text_len, field lengths) per doc; `text(i)` returns the
     /// raw stored bytes of doc i, which must be exactly `text_len` long.
     pub fn finish(
         mut self,
-        docs: &[(DocId, u32, u32)],
+        docs: &[(DocId, u32, u32, Vec<(String, u32)>)],
         mut text: impl FnMut(usize) -> Result<Vec<u8>>,
     ) -> Result<()> {
         let terms_off = self.pos;
@@ -672,7 +755,7 @@ impl StreamWriter {
         let mut clens = Vec::new();
         let mut pending: Vec<u8> = Vec::new();
         let mut total = 0u64;
-        for (i, &(_, _, text_len)) in docs.iter().enumerate() {
+        for (i, &(_, _, text_len, _)) in docs.iter().enumerate() {
             let bytes = text(i)?;
             if bytes.len() != text_len as usize {
                 return Err(Error::Corrupt("stored text length changed during merge"));
@@ -691,12 +774,13 @@ impl StreamWriter {
         let docs_off = self.pos;
         let mut sec = Vec::new();
         let mut text_off = 0u64;
-        let table = docs.iter().map(|&(ext_id, len, text_len)| {
+        let table = docs.iter().map(|&(ext_id, len, text_len, _)| {
             let at = text_off;
             text_off += text_len as u64;
             (ext_id, len, at, text_len)
         });
         write_doc_table(&mut sec, table, total, &clens);
+        write_field_section(&mut sec, docs.iter().map(|d| d.3.as_slice()));
         self.put(&sec)?;
 
         let mut foot = Vec::with_capacity(FOOTER_LEN);

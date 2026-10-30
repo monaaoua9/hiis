@@ -151,3 +151,26 @@ fn verify_and_pruning_hold_with_fields() {
     e.force_merge().unwrap();
     assert!(e.verify(true).is_ok());
 }
+
+#[test]
+fn short_field_outranks_long_field() {
+    let dir = TmpDir::new();
+    let e = Engine::open(&dir.0, small_cfg()).unwrap();
+    // same tf for "rust" in the title, but doc 1's title is much longer; bodies are equal size
+    e.add_fields(&[("title", "rust"), ("body", "x y z w v u t s r q p o n m")]).unwrap();
+    e.add_fields(&[
+        ("title", "rust and a very long winding title with many other words in it"),
+        ("body", "x"),
+    ])
+    .unwrap();
+    e.add_fields(&[("title", "filler"), ("body", "padding")]).unwrap();
+    e.commit().unwrap();
+    let hits = e.search("title:rust", 5).unwrap();
+    assert_eq!(hits[0].doc_id, 0);
+    assert!(hits[0].score > hits[1].score);
+
+    // survives merge and keeps verify happy
+    e.force_merge().unwrap();
+    assert_eq!(e.search("title:rust", 5).unwrap(), hits);
+    assert!(e.verify(true).is_ok(), "{}", e.verify(true));
+}

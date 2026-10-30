@@ -90,6 +90,7 @@ fn check_postings(seg: &Segment, rep: &mut VerifyReport) {
     let n_docs = seg.n_docs();
     let mut per_doc = vec![0u64; n_docs as usize];
     let mut pos = Vec::new();
+    let mut field_sum: std::collections::HashMap<(u32, &str), u64> = std::collections::HashMap::new();
     let mut clean = true; // per-doc sums are meaningless once a list failed to decode
 
     for (i, e) in seg.terms().iter().enumerate() {
@@ -133,6 +134,8 @@ fn check_postings(seg: &Segment, rep: &mut VerifyReport) {
             // field postings repeat tokens that are already counted under their plain term
             if !crate::fields::is_field_term(&e.term) {
                 per_doc[doc as usize] += freq as u64;
+            } else if let Some((f, _)) = e.term.split_once(':') {
+                *field_sum.entry((doc, f)).or_default() += freq as u64;
             }
             if let Err(err) = cur.positions(&mut pos) {
                 rep.problem(format!("segment {sid}: term {:?} doc {doc}: {err}", e.term));
@@ -166,6 +169,14 @@ fn check_postings(seg: &Segment, rep: &mut VerifyReport) {
     }
 
     if clean {
+        for ((doc, f), sum) in &field_sum {
+            if seg.field_len(*doc, f).map(u64::from) != Some(*sum) {
+                let ext = seg.doc(*doc).ext_id;
+                rep.problem(format!(
+                    "segment {sid}: doc {ext}: field {f} length disagrees with its postings"
+                ));
+            }
+        }
         for (local, &sum) in per_doc.iter().enumerate() {
             let want = seg.doc(local as u32).len as u64;
             if sum != want {

@@ -32,6 +32,7 @@ impl Hasher for Fx {
 
 pub struct Grouped {
     n_tokens: u32,
+    flens: Vec<(String, u32)>,
     // sorted by term; positions are flat, `freq` of them per term, ascending
     terms: Vec<(String, u32)>,
     positions: Vec<u32>,
@@ -42,8 +43,15 @@ pub struct Grouped {
 #[derive(Default)]
 pub struct SegmentBuilder {
     terms: HashMap<String, TermBuf, BuildHasherDefault<Fx>>,
-    docs: Vec<(DocId, u32, String)>,
+    docs: Vec<(DocId, u32, Vec<(String, u32)>, String)>,
     ram: usize,
+}
+
+impl Grouped {
+    pub fn with_field_lens(mut self, flens: Vec<(String, u32)>) -> Grouped {
+        self.flens = flens;
+        self
+    }
 }
 
 impl SegmentBuilder {
@@ -72,7 +80,7 @@ impl SegmentBuilder {
             }
             positions.push(t.position);
         }
-        Grouped { n_tokens, terms, positions }
+        Grouped { n_tokens, flens: Vec::new(), terms, positions }
     }
 
     pub fn add(&mut self, id: DocId, text: &str, g: Grouped) {
@@ -96,7 +104,7 @@ impl SegmentBuilder {
         }
 
         self.ram += text.len() + 48;
-        self.docs.push((id, g.n_tokens, text.to_string()));
+        self.docs.push((id, g.n_tokens, g.flens, text.to_string()));
     }
     pub fn len(&self) -> usize {
         self.docs.len()
@@ -116,8 +124,8 @@ impl SegmentBuilder {
 
     pub fn build(self) -> Vec<u8> {
         let mut w = SegmentWriter::new();
-        for (id, len, text) in &self.docs {
-            w.add_doc(*id, *len, text);
+        for (id, len, flens, text) in self.docs {
+            w.add_doc_fields(id, len, flens, &text);
         }
 
         let mut terms: Vec<(String, TermBuf)> = self.terms.into_iter().collect();
