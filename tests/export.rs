@@ -132,3 +132,34 @@ fn reindex_applies_the_current_analyzer() {
     let (ok, _) = hiis(&["reindex", src.0.to_str().unwrap(), dst.0.to_str().unwrap()]);
     assert!(!ok);
 }
+
+#[test]
+fn fields_survive_export_load_and_reindex() {
+    let src = TmpDir::new();
+    {
+        let e = Engine::open(&src.0, small_cfg()).unwrap();
+        e.add_document("plain one").unwrap();
+        e.add_fields(&[("title", "Rust Book"), ("body", "ownership")]).unwrap();
+        e.add_document("plain two").unwrap();
+        e.commit().unwrap();
+    }
+    let file = std::env::temp_dir().join(format!("hiis-fields-{}.jsonl", std::process::id()));
+    assert!(hiis(&["export", src.0.to_str().unwrap(), file.to_str().unwrap()]).0);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text.lines().count(), 3);
+    assert!(text.lines().nth(1).unwrap().contains("\"fields\":{\"title\":\"Rust Book\""));
+
+    let a = TmpDir::new();
+    assert!(hiis(&["load", a.0.to_str().unwrap(), file.to_str().unwrap()]).0);
+    let b = TmpDir::new();
+    assert!(hiis(&["reindex", src.0.to_str().unwrap(), b.0.to_str().unwrap()]).0);
+    for dir in [&a, &b] {
+        let e = Engine::open(&dir.0, small_cfg()).unwrap();
+        assert_eq!(e.stats().live_docs, 3);
+        assert_eq!(sorted_ids(&e.search("title:rust", 5).unwrap()), [1]);
+        assert!(e.search("title:plain", 5).unwrap().is_empty());
+        assert_eq!(e.get_fields(1).unwrap()[1].1, "ownership");
+        assert_eq!(e.get(0).as_deref(), Some("plain one"));
+    }
+    std::fs::remove_file(&file).unwrap();
+}

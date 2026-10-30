@@ -47,6 +47,7 @@ rust AND search NOT go   keywords work too (capitals only)
 compres*                 prefix
 serch~  serch~2          fuzzy, up to 1-2 edits (same first letter)
 title^2  (a b)^0.5       boost; ^0 makes a clause a pure filter
+title:fox  body:(a OR b) one field of a document added with add_fields
 ```
 
 Beyond `search`:

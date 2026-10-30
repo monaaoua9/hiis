@@ -130,7 +130,10 @@ fn check_postings(seg: &Segment, rep: &mut VerifyReport) {
 
             let freq = cur.freq();
             tf_sum += freq as u64;
-            per_doc[doc as usize] += freq as u64;
+            // field postings repeat tokens that are already counted under their plain term
+            if !crate::fields::is_field_term(&e.term) {
+                per_doc[doc as usize] += freq as u64;
+            }
             if let Err(err) = cur.positions(&mut pos) {
                 rep.problem(format!("segment {sid}: term {:?} doc {doc}: {err}", e.term));
                 clean = false;

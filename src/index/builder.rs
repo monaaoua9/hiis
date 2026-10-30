@@ -50,7 +50,12 @@ impl SegmentBuilder {
     // the sort-and-group half of indexing a doc; needs no builder state, so
     // callers do it before taking the buffer lock
     pub fn group(tokens: Vec<Token>) -> Grouped {
-        let n_tokens = tokens.len() as u32;
+        let n = tokens.len() as u32;
+        Self::group_counted(tokens, n)
+    }
+
+    // `n_tokens` is the document length BM25 sees; field postings ride along without counting
+    pub fn group_counted(tokens: Vec<Token>, n_tokens: u32) -> Grouped {
         let mut order: Vec<usize> = (0..tokens.len()).collect();
         order.sort_unstable_by(|&a, &b| {
             tokens[a].term.cmp(&tokens[b].term).then(tokens[a].position.cmp(&tokens[b].position))

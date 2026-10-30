@@ -171,6 +171,8 @@ fn expand_prefix(segments: &[Arc<Segment>], prefix: &str) -> Vec<String> {
             terms[from..]
                 .iter()
                 .take_while(|e| e.term.starts_with(prefix))
+                // field postings (title:x) only answer queries that name the field
+                .filter(|e| crate::fields::is_field_term(&e.term) == prefix.contains(':'))
                 .take(MAX_EXPANSION)
                 .map(|e| e.term.clone()),
         );

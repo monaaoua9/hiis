@@ -13,6 +13,8 @@
 //! serch~               fuzzy: indexed terms within 1-2 edits (by word length), same first letter
 //! serch~1              fuzzy with an explicit distance, 0 to 2
 //! "quick fox"~3        proximity: the words within 3 positions of a phrase match, any order
+//! title:fox            only the `title` field (documents added with `add_fields`)
+//! title:"quick fox"    fields work on phrases, prefixes, fuzzy words and groups: `body:(rust OR go)`
 //! title^2 "a b"^1.5    boost: the clause's score is multiplied (groups too: `(a b)^3`)
 //! +recent^0            boost 0 keeps the clause as a filter that adds nothing to the score
 //! ```
@@ -97,6 +99,35 @@ impl Query {
 const MAX_DEPTH: usize = 16;
 const MAX_SLOP: u32 = 1000;
 
+// "title:" in front of a clause; the name has to look like a field name and something must follow
+fn read_field(chars: &[char], i: &mut usize) -> Option<String> {
+    let mut j = *i;
+    while j < chars.len() && (chars[j].is_ascii_lowercase() || chars[j].is_ascii_digit() || chars[j] == '_') {
+        j += 1;
+    }
+    let name: String = chars[*i..j].iter().collect();
+    let follows = chars.get(j + 1).is_some_and(|c| c.is_alphanumeric() || *c == '"' || *c == '(');
+    if chars.get(j) == Some(&':') && follows && crate::fields::valid_name(&name) {
+        *i = j + 1;
+        return Some(name);
+    }
+    None
+}
+
+// point a parsed clause at one field; terms that already carry one are left alone
+fn qualify(c: &mut Clause, f: &str) {
+    let q = |t: &mut String| {
+        if !t.contains(':') {
+            *t = format!("{f}:{t}");
+        }
+    };
+    match c {
+        Clause::Term(t) | Clause::Prefix(t) | Clause::Fuzzy(t, _) => q(t),
+        Clause::Phrase(p) | Clause::Near(p, _) => p.iter_mut().for_each(|x| q(&mut x.0)),
+        Clause::Group(g) => g.clauses.iter_mut().for_each(|qc| qualify(&mut qc.clause, f)),
+    }
+}
+
 const MAX_BOOST: f32 = 1000.0;
 
 fn parse_boost(num: &str) -> Option<f32> {
@@ -170,6 +201,7 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
             }
         }
 
+        let field = read_field(chars, i);
         let before = clauses.len();
         let boost: f32;
         if chars[*i] == '(' && depth < MAX_DEPTH {
@@ -249,6 +281,12 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
                 for t in an.analyze(text) {
                     clauses.push(QueryClause::new(occur, Clause::Term(t.term)));
                 }
+            }
+        }
+
+        if let Some(f) = &field {
+            for qc in &mut clauses[before..] {
+                qualify(&mut qc.clause, f);
             }
         }
 
@@ -415,6 +453,43 @@ mod tests {
         // no word before the caret, or a bare caret: not a boost
         assert_eq!(parse("^2").clauses.len(), 1);
         assert_eq!(parse("fox^").clauses[0].boost, 1.0);
+    }
+
+    #[test]
+    fn field_prefixes() {
+        let q = parse("title:fox +body:\"quick brown\" -title:comp* body:(rust OR title:go) tit:fuzzi~1");
+        assert_eq!(q.clauses[0].clause, Clause::Term("title:fox".into()));
+        assert_eq!(q.clauses[1].occur, Occur::Must);
+        assert_eq!(
+            q.clauses[1].clause,
+            Clause::Phrase(vec![("body:quick".into(), 0), ("body:brown".into(), 1)])
+        );
+        assert_eq!(q.clauses[2].clause, Clause::Prefix("title:comp".into()));
+        let Clause::Group(g) = &q.clauses[3].clause else { panic!() };
+        assert_eq!(g.clauses[0].clause, Clause::Term("body:rust".into()));
+        // an inner field wins over the outer one
+        assert_eq!(g.clauses[1].clause, Clause::Term("title:go".into()));
+        assert_eq!(q.clauses[4].clause, Clause::Fuzzy("tit:fuzzi".into(), 1));
+    }
+
+    #[test]
+    fn colons_that_are_not_fields() {
+        // uppercase / digit-first names, trailing colon, nothing after it
+        for s in ["Title:fox", "1a:fox", "note: fox", "a:", "http://x.org"] {
+            let q = parse(s);
+            q.visit(&mut |c| {
+                if let Clause::Term(t) = c {
+                    assert!(!t.contains(':'), "{s}: {t}");
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn field_boost_goes_through() {
+        let q = parse("title:fox^3");
+        assert_eq!(q.clauses[0].clause, Clause::Term("title:fox".into()));
+        assert_eq!(q.clauses[0].boost, 3.0);
     }
 
     #[test]

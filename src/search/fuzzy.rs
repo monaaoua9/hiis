@@ -78,6 +78,9 @@ pub fn expand(segments: &[Arc<Segment>], term: &str, dist: u32, limit: usize) ->
         let terms = seg.terms();
         let from = terms.partition_point(|e| e.term.as_str() < head.as_str());
         for e in terms[from..].iter().take_while(|e| e.term.starts_with(&head)) {
+            if crate::fields::is_field_term(&e.term) != term.contains(':') {
+                continue;
+            }
             buf.clear();
             buf.extend(e.term.chars());
             if let Some(d) = distance(&q, &buf, dist) {

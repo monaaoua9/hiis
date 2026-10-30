@@ -535,8 +535,18 @@ impl Segment {
         self.text(local)
     }
 
+    /// The text as readers see it: fielded documents come back as their values, one per line.
     pub fn text(&self, local: u32) -> Option<String> {
+        self.raw_text(local).map(|t| crate::fields::plain(&t))
+    }
+
+    /// The stored form, field markers included.
+    pub fn raw_text(&self, local: u32) -> Option<String> {
         String::from_utf8(self.text_bytes(local).ok()?).ok()
+    }
+
+    pub fn raw_text_of(&self, id: DocId) -> Option<String> {
+        self.raw_text(self.local_of(id)?)
     }
 
     pub(crate) fn text_bytes(&self, local: u32) -> Result<Vec<u8>> {

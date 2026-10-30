@@ -56,13 +56,13 @@ impl Matcher {
             }
             match &qc.clause {
                 Clause::Term(t) => {
-                    self.exact.insert(t.clone());
+                    self.exact.insert(bare(t).to_string());
                 }
-                Clause::Prefix(p) => self.prefixes.push(p.clone()),
+                Clause::Prefix(p) => self.prefixes.push(bare(p).to_string()),
                 Clause::Phrase(p) | Clause::Near(p, _) => {
-                    self.exact.extend(p.iter().map(|x| x.0.clone()));
+                    self.exact.extend(p.iter().map(|x| bare(&x.0).to_string()));
                 }
-                Clause::Fuzzy(t, d) => self.fuzzy.push((t.chars().collect(), *d)),
+                Clause::Fuzzy(t, d) => self.fuzzy.push((bare(t).chars().collect(), *d)),
                 Clause::Group(g) => self.collect(g),
             }
         }
@@ -79,6 +79,11 @@ impl Matcher {
         // same first-letter rule as the search side
         self.fuzzy.iter().any(|(q, d)| q.first() == t.first() && fuzzy::distance(q, &t, *d).is_some())
     }
+}
+
+// "title:fox" -> "fox": the text is highlighted whichever field the query asked about
+fn bare(term: &str) -> &str {
+    term.split_once(':').map_or(term, |x| x.1)
 }
 
 pub fn highlight(an: &Analyzer, text: &str, q: &Query, opts: &HighlightOpts) -> Snippet {

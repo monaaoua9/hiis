@@ -1,7 +1,7 @@
 //! A small HTTP/1.1 + JSON front end, std only.
 //!
 //! ```text
-//! POST   /api/v1/documents               {"text": "..."} or {"documents": ["..", ".."]}
+//! POST   /api/v1/documents               {"text": "..."}, {"documents": [".."]} or {"fields": {"title": "..", "body": ".."}}
 //! GET    /api/v1/documents/{id}
 //! DELETE /api/v1/documents/{id}
 //! GET    /api/v1/documents/{id}/similar?limit=5
@@ -454,14 +454,29 @@ fn body_json(req: &Request) -> std::result::Result<Json, Response> {
 
 fn add_documents(st: &State, req: &Request) -> Reply {
     let body = body_json(req)?;
-    let texts: Vec<&str> = match (body.get("text"), body.get("documents")) {
-        (Some(t), None) => vec![t.as_str().ok_or_else(|| invalid("\"text\" must be a string"))?],
-        (None, Some(Json::Arr(items))) => items
-            .iter()
-            .map(|j| j.as_str().ok_or_else(|| invalid("\"documents\" must be an array of strings")))
-            .collect::<std::result::Result<_, _>>()?,
-        _ => return Err(invalid("send either {\"text\": \"...\"} or {\"documents\": [\"...\"]}")),
-    };
+    if let Some(f) = body.get("fields") {
+        let pairs = crate::fields::from_json(f).map_err(internal)?;
+        let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let id = st.engine.add_fields(&refs).map_err(internal)?;
+        st.dirty.store(true, Ordering::Release);
+        if req.param("commit") == Some("true") {
+            st.engine.commit().map_err(internal)?;
+        }
+        let mut r = ok(Json::obj([("id", id.into())]), Json::Null);
+        r.status = 201;
+        return Ok(r);
+    }
+    let texts: Vec<&str> =
+        match (body.get("text"), body.get("documents")) {
+            (Some(t), None) => vec![t.as_str().ok_or_else(|| invalid("\"text\" must be a string"))?],
+            (None, Some(Json::Arr(items))) => items
+                .iter()
+                .map(|j| j.as_str().ok_or_else(|| invalid("\"documents\" must be an array of strings")))
+                .collect::<std::result::Result<_, _>>()?,
+            _ => return Err(invalid(
+                "send {\"text\": \"...\"}, {\"documents\": [\"...\"]} or {\"fields\": {\"title\": \"...\"}}",
+            )),
+        };
     if texts.is_empty() {
         return Err(invalid("no documents"));
     }
@@ -483,7 +498,13 @@ fn add_documents(st: &State, req: &Request) -> Reply {
 fn get_document(st: &State, id: &str) -> Reply {
     let id = doc_id(id)?;
     match st.engine.get(id) {
-        Some(text) => Ok(ok(Json::obj([("id", id.into()), ("text", text.into())]), Json::Null)),
+        Some(text) => {
+            let mut doc = vec![("id".to_string(), Json::from(id)), ("text".to_string(), text.into())];
+            if let Some(f) = st.engine.get_fields(id) {
+                doc.push(("fields".to_string(), crate::fields::to_json(&f)));
+            }
+            Ok(ok(Json::Obj(doc), Json::Null))
+        }
         None => Err(fail(404, "NOT_FOUND", "no such document")),
     }
 }

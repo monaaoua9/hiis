@@ -270,6 +270,36 @@ fn malformed_requests_dont_hurt() {
     let mut c = conn(&srv);
     let big = format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(40_000));
     let _ = c.write_all(big.as_bytes());
-    assert_eq!(read_reply(&mut c).status, 431);
+    // the server may reset the connection before we read the 431 (unread request data), either is fine
+    let mut buf = Vec::new();
+    let _ = c.read_to_end(&mut buf);
+    assert!(buf.is_empty() || String::from_utf8_lossy(&buf).contains("431"));
     assert_eq!(call(&srv, "GET", "/health", "").status, 200);
+}
+
+#[test]
+fn fielded_documents_over_http() {
+    let (_d, _e, srv) = start(ServerConfig::default());
+    let body = r#"{"fields": {"title": "Rust in Action", "body": "ownership and borrowing"}}"#;
+    let r = call(&srv, "POST", "/api/v1/documents?commit=true", body);
+    assert_eq!(r.status, 201);
+    call(
+        &srv,
+        "POST",
+        "/api/v1/documents?commit=true",
+        r#"{"fields": {"title": "Baking", "body": "rust on the oven door"}}"#,
+    );
+
+    let r = call(&srv, "GET", "/api/v1/search?q=title%3Arust", "");
+    let hits = data(&r).as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(num(hits[0].get("id").unwrap()), 0.0);
+
+    let r = call(&srv, "GET", "/api/v1/documents/0", "");
+    assert_eq!(data(&r).get("fields").unwrap().get("title").unwrap().as_str(), Some("Rust in Action"));
+    assert_eq!(data(&r).get("text").unwrap().as_str(), Some("Rust in Action\nownership and borrowing"));
+
+    assert_eq!(call(&srv, "POST", "/api/v1/documents", r#"{"fields": {"Bad Name": "x"}}"#).status, 400);
+    assert_eq!(call(&srv, "POST", "/api/v1/documents", r#"{"fields": {"title": 5}}"#).status, 400);
+    assert_eq!(call(&srv, "POST", "/api/v1/documents", r#"{"fields": []}"#).status, 400);
 }

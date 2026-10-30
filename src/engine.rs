@@ -21,6 +21,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::analysis::{Analyzer, AnalyzerConfig};
 use crate::error::{Error, Result};
+use crate::fields;
 use crate::highlight::{self, HighlightOpts, Snippet};
 use crate::index::builder::SegmentBuilder;
 use crate::index::merge::{merge_segments, MergePolicy};
@@ -188,7 +189,7 @@ impl Engine {
         };
         let mut builder = SegmentBuilder::default();
         for (id, text) in replayed.into_iter().filter(|r| r.0 >= flushed_upto) {
-            builder.add(id, &text, SegmentBuilder::group(analyzer.analyze(&text)));
+            builder.add(id, &text, fields::index(&analyzer, &text));
             next_doc = next_doc.max(id + 1);
         }
 
@@ -225,7 +226,21 @@ impl Engine {
 
     pub fn add_document(&self, text: &str) -> Result<DocId> {
         self.writable()?;
-        let grouped = SegmentBuilder::group(self.shared.analyzer.analyze(text));
+        if text.contains([fields::REC, fields::SEP]) {
+            return Err(Error::Invalid("text can't contain control characters 0x1e / 0x1f".into()));
+        }
+        self.add_raw(text)
+    }
+
+    /// A document with named fields. Search it with `title:fox`, or without a field to look
+    /// at all of them; `get` returns the values one per line, `get_fields` the pairs.
+    pub fn add_fields(&self, fields: &[(&str, &str)]) -> Result<DocId> {
+        self.add_raw(&fields::encode(fields)?)
+    }
+
+    fn add_raw(&self, text: &str) -> Result<DocId> {
+        self.writable()?;
+        let grouped = fields::index(&self.shared.analyzer, text);
 
         let mut buf = self.shared.buffer.lock().unwrap();
         // id is taken under the buffer lock: flush relies on "every id below
@@ -245,7 +260,10 @@ impl Engine {
     pub fn add_documents<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Result<Vec<DocId>> {
         self.writable()?;
         let an = &self.shared.analyzer;
-        let one = |t: &S| SegmentBuilder::group(an.analyze(t.as_ref()));
+        if texts.iter().any(|t| t.as_ref().contains([fields::REC, fields::SEP])) {
+            return Err(Error::Invalid("text can't contain control characters 0x1e / 0x1f".into()));
+        }
+        let one = |t: &S| fields::index(an, t.as_ref());
         let lanes = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
         let grouped: Vec<_> = if lanes < 2 || texts.len() < 32 {
             texts.iter().map(one).collect()
@@ -325,7 +343,7 @@ impl Engine {
         let snapshot = self.shared.segments.read().unwrap().clone();
         let mut df: HashMap<&str, u64> = HashMap::new();
         for seg in &snapshot {
-            for e in seg.terms() {
+            for e in seg.terms().iter().filter(|e| !fields::is_field_term(&e.term)) {
                 *df.entry(e.term.as_str()).or_default() += e.doc_freq as u64;
             }
         }
@@ -373,6 +391,14 @@ impl Engine {
         let snapshot = self.shared.segments.read().unwrap().clone();
         let params = Bm25 { k1: self.shared.cfg.bm25_k1, b: self.shared.cfg.bm25_b };
         search::execute_with(&snapshot, &q, k, params, false)
+    }
+
+    /// The (name, value) pairs of a document added with `add_fields`; None for plain documents
+    /// and for ids that don't exist.
+    pub fn get_fields(&self, id: DocId) -> Option<Vec<(String, String)>> {
+        let segs = self.shared.segments.read().unwrap();
+        let raw = segs.iter().find_map(|s| s.raw_text_of(id))?;
+        fields::decode(&raw).map(|f| f.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
     }
 
     pub fn get(&self, id: DocId) -> Option<String> {
@@ -464,6 +490,14 @@ impl Engine {
     /// Every live committed document in id order, text included. The callback returning an error
     /// stops the walk. Works on a snapshot, so writes during the walk don't show up in it.
     pub fn for_each_document(&self, mut f: impl FnMut(DocId, &str) -> Result<()>) -> Result<()> {
+        self.for_each_record(|id, _, text| f(id, text))
+    }
+
+    /// Like `for_each_document`, plus the field pairs of documents added with `add_fields`.
+    pub fn for_each_record(
+        &self,
+        mut f: impl FnMut(DocId, Option<&[(String, String)]>, &str) -> Result<()>,
+    ) -> Result<()> {
         let snapshot = self.shared.segments.read().unwrap().clone();
         let mut order: Vec<(DocId, usize, u32)> = Vec::new();
         for (si, seg) in snapshot.iter().enumerate() {
@@ -473,10 +507,12 @@ impl Engine {
         }
         order.sort_unstable();
         for (id, si, local) in order {
-            let Some(text) = snapshot[si].text(local) else {
+            let Some(raw) = snapshot[si].raw_text(local) else {
                 return Err(Error::Corrupt("stored text unreadable"));
             };
-            f(id, &text)?;
+            let pairs: Option<Vec<(String, String)>> = fields::decode(&raw)
+                .map(|p| p.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
+            f(id, pairs.as_deref(), &fields::plain(&raw))?;
         }
         Ok(())
     }

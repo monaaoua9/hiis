@@ -21,6 +21,7 @@ pub mod analysis;
 pub mod codec;
 pub mod engine;
 pub mod error;
+pub mod fields;
 pub mod highlight;
 pub mod index;
 pub mod json;

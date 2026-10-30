@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::analysis::{arabic, Analyzer};
+use crate::fields;
 use crate::index::segment::Segment;
 use crate::search::fuzzy;
 
@@ -61,7 +62,7 @@ fn surface(
 /// Words that start with `prefix`, most widespread first. Typing past the end of a
 /// stem works too: "compressi" still finds "compression".
 pub fn complete(segs: &[Arc<Segment>], an: &Analyzer, prefix: &str, limit: usize) -> Vec<Suggestion> {
-    let Some(p) = an.fold_prefix(prefix) else { return Vec::new() };
+    let Some(p) = an.fold_prefix(prefix).filter(|p| !p.contains(':')) else { return Vec::new() };
     if limit == 0 {
         return Vec::new();
     }
@@ -70,7 +71,11 @@ pub fn complete(segs: &[Arc<Segment>], an: &Analyzer, prefix: &str, limit: usize
     for seg in segs {
         let terms = seg.terms();
         let from = terms.partition_point(|e| e.term.as_str() < p.as_str());
-        for e in terms[from..].iter().take_while(|e| e.term.starts_with(&p)) {
+        for e in terms[from..]
+            .iter()
+            .take_while(|e| e.term.starts_with(&p))
+            .filter(|e| !fields::is_field_term(&e.term))
+        {
             *cands.entry(e.term.clone()).or_default() += e.doc_freq as u64;
         }
         // stems cut words short: every proper prefix of what was typed is a possible stem

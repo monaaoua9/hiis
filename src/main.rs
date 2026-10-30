@@ -182,8 +182,12 @@ fn run(args: &[String]) -> Result<()> {
                 [file] => Box::new(BufWriter::new(fs::File::create(file)?)),
                 _ => return Err(bad_usage()),
             };
-            engine.for_each_document(|id, text| {
-                let line = Json::obj([("id", id.into()), ("text", text.into())]);
+            engine.for_each_record(|id, fields, text| {
+                let mut line = vec![("id", Json::from(id)), ("text", text.into())];
+                if let Some(f) = fields {
+                    line.push(("fields", hiis::fields::to_json(f)));
+                }
+                let line = Json::Obj(line.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
                 writeln!(out, "{line}")?;
                 Ok(())
             })?;
@@ -197,6 +201,18 @@ fn run(args: &[String]) -> Result<()> {
             for (i, line) in raw.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
                 let doc =
                     Json::parse(line).map_err(|e| hiis::Error::Invalid(format!("line {}: {e}", i + 1)))?;
+                if let Some(f) = doc.get("fields") {
+                    // keep the order of the file: plain documents queued so far go in first
+                    engine.add_documents(&batch)?;
+                    n += batch.len();
+                    batch.clear();
+                    let pairs = hiis::fields::from_json(f)?;
+                    let refs: Vec<(&str, &str)> =
+                        pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                    engine.add_fields(&refs)?;
+                    n += 1;
+                    continue;
+                }
                 let Some(text) = doc.get("text").and_then(Json::as_str) else {
                     return Err(hiis::Error::Invalid(format!("line {}: no \"text\" string", i + 1)));
                 };
@@ -218,7 +234,16 @@ fn run(args: &[String]) -> Result<()> {
             }
             let mut batch: Vec<String> = Vec::new();
             let mut n = 0usize;
-            engine.for_each_document(|_, text| {
+            engine.for_each_record(|_, fields, text| {
+                if let Some(f) = fields {
+                    target.add_documents(&batch)?;
+                    n += batch.len();
+                    batch.clear();
+                    let refs: Vec<(&str, &str)> = f.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                    target.add_fields(&refs)?;
+                    n += 1;
+                    return Ok(());
+                }
                 batch.push(text.to_string());
                 if batch.len() == 256 {
                     target.add_documents(&batch)?;

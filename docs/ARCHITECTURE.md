@@ -101,6 +101,16 @@ so pruned and exhaustive results stay bit-identical. Pagination passes the previ
 as an exclusive bound that `offer` enforces. `explain` re-runs each clause against one document with
 the same statistics, so its total is the score search reports.
 
+## Fields
+
+A fielded document is stored as ` name  value` records and indexed twice over: every token under
+its plain term (so unfielded queries see all the text, exactly as before) and under `name:term`. The
+parser rewrites `title:x` clauses to those terms. Plain prefix / fuzzy expansion skips terms with a colon
+and field queries only look at them. Positions restart per field with a gap of 50, so phrases and
+proximity don't cross fields. BM25 uses whole-document length for field terms too, and the length
+counted in the segment is the plain-token one, which keeps `verify` consistent. `Segment::text` hands
+readers the values joined by newlines; merges copy the raw bytes.
+
 ## Known limits (deliberate scope)
 
 * Segment files up to `Config::resident_limit` (512 MB) are held in memory; bigger
