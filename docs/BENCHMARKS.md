@@ -57,8 +57,26 @@ These did not exist in the old build, so there is nothing to compare against. Wh
 - Fuzzy on a short word is as expensive as a common term here because the synthetic vocabulary has 20,000 terms that all start with `w`; with a real vocabulary the first-letter restriction cuts the scan far more.
 - Proximity is the slowest query: it decodes positions for both very common terms and sorts them per document. Phrase and group queries are exhaustive by design.
 
+## Server
+
+```
+cargo run --release --example serve_bench -- 20000 <clients> 3
+```
+
+20,000 synthetic documents, `GET /api/v1/search?k=10` over keep-alive connections, a rotating mix of five queries (one common term, two terms, three terms, a phrase, a prefix). Three 3-second rounds per client count, median with min-max. Clients and server run on the same machine and compete for the same cores, so this understates what a separate client box would see. The three client counts were run one after another, not interleaved.
+
+| clients | req/s | p50 µs | p95 µs | p99 µs |
+|---:|---:|---:|---:|---:|
+| 1 | 263 (182 - 297) | 1,022 (973 - 1,071) | 16,061 (15,650 - 19,379) | 22,910 (19,247 - 61,846) |
+| 8 | 1,685 (1,239 - 1,868) | 1,103 (1,015 - 1,107) | 17,790 (16,041 - 29,520) | 25,038 (23,619 - 54,377) |
+| 64 | 1,881 (1,876 - 1,983) | 1,270 (1,130 - 1,559) | 111,106 (85,193 - 128,394) | 573,687 (543,216 - 830,304) |
+
+- The p50 is about 1 ms, but the mix contains a phrase and a prefix query that cost 15 ms or more, and one client waits for each response, so a single client only manages a few hundred requests a second. The p95 is those slow queries, not queueing.
+- Throughput scales from 1 to 8 clients (about 6x) and then flattens near 1,900 req/s: that is where the 4 cores (8 threads, shared with the clients) run out. Past that, more clients only add queueing, which shows as the 64-client p95/p99.
+- With 64 clients the p99 is over half a second. A thread per connection is simple and doesn't starve idle clients, but it does not shed load gracefully before `max_connections`. Behind a proxy that limits concurrency this isn't a problem; exposed directly, lower `--max-conns`.
+- Writes (POST /documents) are not measured.
+
 ## Not measured
 
 - Ranking quality on SciFact (nDCG@10 0.6827) and the Tantivy comparison in the README need the BEIR datasets and a separate build. They were not rerun today and come from an earlier session.
-- Server throughput. The tests cover correctness under concurrent clients, not requests per second.
 - Field-restricted queries (`title:x`) and per-field length scoring were not benchmarked; the synthetic corpus has no fields.

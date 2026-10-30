@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* `examples/serve_bench.rs`: requests per second and latency percentiles for the HTTP search endpoint at a chosen client count; numbers in docs/BENCHMARKS.md.
+
 * Arabic stemmer: `-يات` feminine plurals and a bare alef tanween (قروضا) now meet their base form. Terms change, so run `hiis reindex` on existing Arabic content.
 * `data/arabic-eval` (60 docs, 34 queries) and `eval --no-arabic-stem` / `--verbose` to measure Arabic retrieval; nDCG@10 0.60 without stemming, 0.97 with (small, self-written set, see README).
 
