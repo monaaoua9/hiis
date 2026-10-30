@@ -31,6 +31,7 @@ use crate::search::explain::Explanation;
 use crate::search::query::Query;
 use crate::search::{self, Hit};
 use crate::suggest::{self, Suggestion};
+use crate::verify::{self, VerifyReport};
 use crate::wal::Wal;
 
 const MANIFEST: &str = "MANIFEST";
@@ -326,6 +327,65 @@ impl Engine {
         let text = self.get(id)?;
         let q = Query::parse(query, &self.shared.analyzer);
         Some(highlight::highlight(&self.shared.analyzer, &text, &q, opts))
+    }
+
+    /// Walk every posting list of every segment and check it against the segment's own
+    /// bookkeeping. `deep` also decompresses and re-analyses all stored text, which is slow.
+    pub fn verify(&self, deep: bool) -> VerifyReport {
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        verify::verify(&snapshot, &self.shared.analyzer, deep)
+    }
+
+    /// Copy the committed state of the index into `dest`, which can then be opened as an index
+    /// of its own. Documents still in the RAM buffer are committed first; writes that land
+    /// while the copy runs may or may not be in it. Searches keep working throughout, merges
+    /// wait.
+    pub fn backup(&self, dest: impl AsRef<Path>) -> Result<()> {
+        let dest = dest.as_ref();
+        if dest == self.shared.dir {
+            return Err(Error::Invalid("backup target is the index itself".into()));
+        }
+        fs::create_dir_all(dest)?;
+        if dest.join(MANIFEST).exists() {
+            return Err(Error::Invalid("backup target already holds an index".into()));
+        }
+        self.commit()?;
+
+        // a merge deletes its input files when it finishes
+        let _g = self.shared.merge_mu.lock().unwrap();
+        let segs = self.shared.segments.read().unwrap().clone();
+        // read after the snapshot, so it is above every id the snapshot contains
+        let next_doc = self.shared.next_doc.load(Ordering::Relaxed);
+        let next_seg = self.shared.next_seg.load(Ordering::Relaxed);
+
+        let mut manifest = format!(
+            "next_doc {next_doc}
+next_seg {next_seg}
+flushed_upto {next_doc}
+"
+        );
+        for s in &segs {
+            s.persist_deletes(&self.shared.dir)?;
+            for (from, to) in [
+                (seg_path(&self.shared.dir, s.id()), seg_path(dest, s.id())),
+                (del_path(&self.shared.dir, s.id()), del_path(dest, s.id())),
+            ] {
+                match fs::copy(&from, &to) {
+                    Ok(_) => fs::OpenOptions::new().write(true).open(&to)?.sync_all()?,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            && from.extension().is_some_and(|x| x == "del") => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            manifest.push_str(&format!(
+                "segment {}
+",
+                s.id()
+            ));
+        }
+        // last, so a half-finished copy is never mistaken for an index
+        write_atomic(&dest.join(MANIFEST), manifest.as_bytes())
     }
 
     /// Merge everything into one segment, dropping deleted docs.

@@ -13,6 +13,8 @@ usage:
   hiis get    <dir> <doc-id>
   hiis delete <dir> <doc-id>
   hiis merge  <dir>               merge all segments into one
+  hiis verify <dir> [--deep]      check posting lists (and stored text with --deep)
+  hiis backup <dir> <dest>        consistent copy of the committed index
   hiis stats  <dir>";
 
 fn main() -> ExitCode {
@@ -108,6 +110,22 @@ fn run(args: &[String]) -> Result<()> {
         ("merge", []) => {
             engine.force_merge()?;
             println!("{:?}", engine.stats());
+        }
+        ("verify", opts) => {
+            let deep = match opts {
+                [] => false,
+                [flag] if flag == "--deep" => true,
+                _ => return Err(bad_usage()),
+            };
+            let rep = engine.verify(deep);
+            println!("{rep}");
+            if !rep.is_ok() {
+                return Err(hiis::Error::Corrupt("verify found problems"));
+            }
+        }
+        ("backup", [dest]) => {
+            engine.backup(dest)?;
+            println!("backed up to {dest}");
         }
         ("stats", []) => {
             let s = engine.stats();

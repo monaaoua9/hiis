@@ -25,6 +25,7 @@ pub mod highlight;
 pub mod index;
 pub mod search;
 pub mod suggest;
+pub mod verify;
 mod wal;
 
 pub use engine::{Config, Engine, Stats};
@@ -34,3 +35,4 @@ pub use index::DocId;
 pub use search::explain::{ClauseExplain, Explanation};
 pub use search::Hit;
 pub use suggest::Suggestion;
+pub use verify::VerifyReport;

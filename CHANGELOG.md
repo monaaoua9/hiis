@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* `Engine::verify(deep)` / `hiis verify`: walks every posting list (order, counts, positions, per-document token totals) and, with `--deep`, re-analyses all stored text. Catches damage that still passes the segment checksum.
+* `Engine::backup(dest)` / `hiis backup`: consistent copy of the committed index while searches and writes continue; merges wait for the copy. The result opens as an independent index.
 * `Engine::explain` / `hiis explain`: per-clause score breakdown for one document (idf, tf, lengths for terms), also for documents that did not make it, which shows what excluded them. The total equals the score `search` reports.
 * `Engine::complete` (autocomplete) and `Engine::did_you_mean`: both answered from the term dictionary, and mapped from stems back to words that occur in live documents. CLI: `complete`, and a suggestion when a search finds nothing.
 * `Engine::highlight`: snippet of the densest `max_chars` window with the query's words marked (stemmed, prefix and fuzzy matches included, negated terms not). HTML-escaped by default. The CLI `search` prints snippets with the hits in bold.
