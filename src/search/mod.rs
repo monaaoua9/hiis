@@ -169,11 +169,11 @@ fn offer(heap: &mut BinaryHeap<Reverse<Hit>>, k: usize, hit: Hit) {
 }
 
 // only plain "a b c" queries are pruned; MUST/NOT/phrase go through the exhaustive path
-fn pure_disjunction(q: &Query) -> Option<Vec<&str>> {
+fn pure_disjunction(q: &Query) -> Option<Vec<(&str, f32)>> {
     q.clauses
         .iter()
         .map(|c| match (&c.occur, &c.clause) {
-            (Occur::Should, Clause::Term(t)) => Some(t.as_str()),
+            (Occur::Should, Clause::Term(t)) => Some((t.as_str(), c.boost)),
             _ => None,
         })
         .collect()
@@ -185,6 +185,7 @@ const SLACK: f32 = 1.0001;
 struct Lane<'a> {
     cur: PostingsCursor<'a>,
     idf: f32,
+    boost: f32,
     ub: f32,
     order: usize,
 }
@@ -199,7 +200,7 @@ fn lane_doc(l: &Lane) -> u32 {
 /// same formula, summed in query-clause order.
 fn wand_segment(
     seg: &Segment,
-    terms: &[&str],
+    terms: &[(&str, f32)],
     ctx: &Ctx,
     k: usize,
     heap: &mut BinaryHeap<Reverse<Hit>>,
@@ -207,15 +208,15 @@ fn wand_segment(
     let dels = seg.deleted_snapshot();
 
     let mut lanes: Vec<Lane> = Vec::with_capacity(terms.len());
-    for (order, t) in terms.iter().enumerate() {
+    for (order, (t, boost)) in terms.iter().enumerate() {
         let Some(entry) = seg.term(t) else { continue };
         let mut cur = seg.cursor(entry)?;
         if cur.next()?.is_none() {
             continue;
         }
         let idf = ctx.idf[*t];
-        let ub = ctx.bm25.upper_bound(idf, cur.max_tf());
-        lanes.push(Lane { cur, idf, ub, order });
+        let ub = ctx.bm25.upper_bound(idf, cur.max_tf()) * boost;
+        lanes.push(Lane { cur, idf, boost: *boost, ub, order });
     }
 
     // one term: no pivoting needed, just skip blocks that can't reach the top-k
@@ -224,7 +225,7 @@ fn wand_segment(
         let mut cur_doc = lane.cur.doc();
         while let Some(d) = cur_doc {
             if heap.len() >= k {
-                let block_ub = ctx.bm25.upper_bound(lane.idf, lane.cur.block_max_tf());
+                let block_ub = ctx.bm25.upper_bound(lane.idf, lane.cur.block_max_tf()) * lane.boost;
                 if block_ub * SLACK < heap.peek().unwrap().0.score {
                     cur_doc = lane.cur.advance(lane.cur.block_last_doc().saturating_add(1))?;
                     continue;
@@ -232,7 +233,7 @@ fn wand_segment(
             }
             if !bit_set(&dels, d) {
                 let dl = seg.doc(d).len as f32;
-                let score = ctx.bm25.score(lane.idf, lane.cur.freq() as f32, dl, ctx.avg_len);
+                let score = ctx.bm25.score(lane.idf, lane.cur.freq() as f32, dl, ctx.avg_len) * lane.boost;
                 offer(heap, k, Hit { doc_id: seg.doc(d).ext_id, score });
             }
             cur_doc = lane.cur.next()?;
@@ -272,7 +273,7 @@ fn wand_segment(
             let dl = seg.doc(d).len as f32;
             for l in &lanes[ne..] {
                 if lane_doc(l) == d {
-                    let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len);
+                    let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len) * l.boost;
                     parts.push((l.order, sc));
                     sum += sc;
                 }
@@ -282,7 +283,7 @@ fn wand_segment(
             if (sum + rest) * SLACK >= theta {
                 for l in lanes[..ne].iter_mut().rev() {
                     if l.cur.advance(d)? == Some(d) {
-                        let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len);
+                        let sc = ctx.bm25.score(l.idf, l.cur.freq() as f32, dl, ctx.avg_len) * l.boost;
                         parts.push((l.order, sc));
                         sum += sc;
                     }
@@ -320,7 +321,7 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
     let mut not = Vec::new();
 
     for qc in &q.clauses {
-        let hits = match &qc.clause {
+        let mut hits = match &qc.clause {
             Clause::Term(t) => eval_term(seg, &dels, t, ctx)?,
             Clause::Prefix(p) => {
                 let mut lists = Vec::new();
@@ -342,6 +343,9 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
             }
             Clause::Group(g) => eval_segment(seg, g, ctx)?,
         };
+        if qc.boost != 1.0 {
+            hits.iter_mut().for_each(|x| x.1 *= qc.boost);
+        }
         match qc.occur {
             Occur::Must => must.push(hits),
             Occur::Should => should.push(hits),

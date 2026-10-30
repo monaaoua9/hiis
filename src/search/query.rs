@@ -13,6 +13,8 @@
 //! serch~               fuzzy: indexed terms within 1-2 edits (by word length), same first letter
 //! serch~1              fuzzy with an explicit distance, 0 to 2
 //! "quick fox"~3        proximity: the words within 3 positions of a phrase match, any order
+//! title^2 "a b"^1.5    boost: the clause's score is multiplied (groups too: `(a b)^3`)
+//! +recent^0            boost 0 keeps the clause as a filter that adds nothing to the score
 //! ```
 //!
 //! AND / OR / NOT only count in capitals, lowercase `and` is a stopword like
@@ -29,7 +31,7 @@ pub enum Occur {
     MustNot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Clause {
     Term(String),
     // matches every indexed term starting with this (already folded, not stemmed)
@@ -43,13 +45,20 @@ pub enum Clause {
     Group(Query),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryClause {
     pub occur: Occur,
     pub clause: Clause,
+    pub boost: f32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+impl QueryClause {
+    pub fn new(occur: Occur, clause: Clause) -> Self {
+        QueryClause { occur, clause, boost: 1.0 }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Query {
     pub clauses: Vec<QueryClause>,
 }
@@ -87,6 +96,38 @@ impl Query {
 // deeper than this and the rest is read as plain text, so "((((((..." can't blow the stack
 const MAX_DEPTH: usize = 16;
 const MAX_SLOP: u32 = 1000;
+
+const MAX_BOOST: f32 = 1000.0;
+
+fn parse_boost(num: &str) -> Option<f32> {
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return None;
+    }
+    num.parse::<f32>().ok().map(|b| b.min(MAX_BOOST))
+}
+
+// "word^2.5" -> ("word", Some(2.5)); anything that doesn't parse stays part of the word
+fn split_boost(text: &str) -> (&str, Option<f32>) {
+    if let Some((word, tail)) = text.rsplit_once('^') {
+        if !word.is_empty() {
+            if let Some(b) = parse_boost(tail) {
+                return (word, Some(b));
+            }
+        }
+    }
+    (text, None)
+}
+
+// after a closing quote or paren
+fn read_boost(chars: &[char], i: &mut usize) -> Option<f32> {
+    if chars.get(*i) != Some(&'^') {
+        return None;
+    }
+    let n = chars[*i + 1..].iter().take_while(|c| c.is_ascii_digit() || **c == '.').count();
+    let b = parse_boost(&chars[*i + 1..*i + 1 + n].iter().collect::<String>())?;
+    *i += 1 + n;
+    Some(b)
+}
 
 // "word~" or "word~2"; the number is clamped to what fuzzy matching supports
 fn split_fuzzy(text: &str) -> Option<(&str, Option<u32>)> {
@@ -130,11 +171,13 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
         }
 
         let before = clauses.len();
+        let boost: f32;
         if chars[*i] == '(' && depth < MAX_DEPTH {
             *i += 1;
             let sub = parse_level(chars, i, an, depth + 1);
+            boost = read_boost(chars, i).unwrap_or(1.0);
             if !sub.clauses.is_empty() {
-                clauses.push(QueryClause { occur, clause: Clause::Group(sub) });
+                clauses.push(QueryClause::new(occur, Clause::Group(sub)));
             }
         } else if chars[*i] == '"' {
             *i += 1;
@@ -154,16 +197,17 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
                     *i += 1 + digits;
                 }
             }
+            boost = read_boost(chars, i).unwrap_or(1.0);
 
             let toks = an.analyze(&text);
             match toks.len() {
                 0 => {}
-                1 => clauses.push(QueryClause { occur, clause: Clause::Term(toks[0].term.clone()) }),
+                1 => clauses.push(QueryClause::new(occur, Clause::Term(toks[0].term.clone()))),
                 _ => {
                     let first = toks[0].position;
                     let parts = toks.into_iter().map(|t| (t.term, t.position - first)).collect();
                     let clause = if slop == 0 { Clause::Phrase(parts) } else { Clause::Near(parts, slop) };
-                    clauses.push(QueryClause { occur, clause });
+                    clauses.push(QueryClause::new(occur, clause));
                 }
             }
         } else {
@@ -172,9 +216,11 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
                 *i += 1;
             }
             let text: String = chars[s..*i].iter().collect();
+            let (text, b) = split_boost(&text);
+            boost = b.unwrap_or(1.0);
 
             if occur == Occur::Should {
-                match text.as_str() {
+                match text {
                     "AND" => {
                         and = true;
                         continue;
@@ -191,17 +237,17 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
                 }
             }
 
-            if let Some((word, dist)) = split_fuzzy(&text) {
+            if let Some((word, dist)) = split_fuzzy(text) {
                 for t in an.analyze(word) {
                     let d = dist.unwrap_or_else(|| fuzzy::auto_dist(&t.term));
-                    clauses.push(QueryClause { occur, clause: Clause::Fuzzy(t.term, d) });
+                    clauses.push(QueryClause::new(occur, Clause::Fuzzy(t.term, d)));
                 }
             } else if let Some(p) = text.strip_suffix('*').and_then(|stem| an.fold_prefix(stem)) {
-                clauses.push(QueryClause { occur, clause: Clause::Prefix(p) });
+                clauses.push(QueryClause::new(occur, Clause::Prefix(p)));
             } else {
                 // "wi-fi" analyses to two terms; each gets the same occur
-                for t in an.analyze(&text) {
-                    clauses.push(QueryClause { occur, clause: Clause::Term(t.term) });
+                for t in an.analyze(text) {
+                    clauses.push(QueryClause::new(occur, Clause::Term(t.term)));
                 }
             }
         }
@@ -214,6 +260,7 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
             }
             for qc in &mut clauses[before..] {
                 qc.occur = occur;
+                qc.boost = boost;
             }
             // the left side of an AND is promoted too, unless it was already negated
             if and && before > 0 && clauses[before - 1].occur == Occur::Should {
@@ -235,7 +282,7 @@ mod tests {
     }
 
     fn term(occur: Occur, t: &str) -> QueryClause {
-        QueryClause { occur, clause: Clause::Term(t.into()) }
+        QueryClause::new(occur, Clause::Term(t.into()))
     }
 
     #[test]
@@ -282,8 +329,8 @@ mod tests {
         assert_eq!(
             q.clauses,
             [
-                QueryClause { occur: Occur::Must, clause: Clause::Prefix("runn".into()) },
-                QueryClause { occur: Occur::MustNot, clause: Clause::Prefix("x".into()) },
+                QueryClause::new(Occur::Must, Clause::Prefix("runn".into())),
+                QueryClause::new(Occur::MustNot, Clause::Prefix("x".into())),
             ]
         );
         // a lone star has nothing to expand, falls through to the normal path
@@ -329,7 +376,7 @@ mod tests {
 
     #[test]
     fn fuzzy_suffix() {
-        let f = |t: &str, d: u32| QueryClause { occur: Occur::Should, clause: Clause::Fuzzy(t.into(), d) };
+        let f = |t: &str, d: u32| QueryClause::new(Occur::Should, Clause::Fuzzy(t.into(), d));
         assert_eq!(parse("quikc~").clauses, [f("quikc", 1)]);
         assert_eq!(parse("quikcer~").clauses, [f("quikcer", 2)]);
         assert_eq!(parse("quick~0").clauses, [f("quick", 0)]);
@@ -355,6 +402,19 @@ mod tests {
         // tilde without digits isn't slop
         assert_eq!(parse("\"quick fox\"~").clauses.len(), 1);
         assert_eq!(parse("\"quick fox\"~99999999999999999999").clauses.len(), 1);
+    }
+
+    #[test]
+    fn boosts() {
+        let q = parse("fox^2 \"quick brown\"^0.5 (a1 b1)^3 +cat^0 dog^x");
+        let b: Vec<f32> = q.clauses.iter().map(|c| c.boost).collect();
+        assert_eq!(b, [2.0, 0.5, 3.0, 0.0, 1.0, 1.0]);
+        assert_eq!(parse("serch~1^4").clauses[0].boost, 4.0);
+        assert_eq!(parse("comp*^2").clauses[0].boost, 2.0);
+        assert_eq!(parse("fox^99999999").clauses[0].boost, MAX_BOOST);
+        // no word before the caret, or a bare caret: not a boost
+        assert_eq!(parse("^2").clauses.len(), 1);
+        assert_eq!(parse("fox^").clauses[0].boost, 1.0);
     }
 
     #[test]

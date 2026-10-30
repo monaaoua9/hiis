@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* Clause boosts: `title^2`, `"a b"^1.5`, `(x y)^3`. `^0` turns a clause into a pure filter. MaxScore applies the boost to its bounds, results stay identical to exhaustive scoring.
 * Proximity queries: `"quick fox"~3` matches the words within a window of the phrase, in any order (a swap costs 2). Ranked by window count.
 * Fuzzy terms: `serch~`, `serch~2`. Optimal-string-alignment distance over the term dictionary (same first letter, up to 64 variants), closer variants score higher.
 * Grouped queries: `(a OR b) AND NOT c`, nested to 16 levels. `AND`/`OR`/`NOT` keywords (capitals only) next to `+`/`-`.

@@ -117,3 +117,72 @@ fn proximity_ranks_tighter_matches_higher() {
     assert_eq!(sorted_ids(&hits), [0, 1]);
     assert_eq!(hits[0].doc_id, 0);
 }
+
+#[test]
+fn boost_reorders_results() {
+    let dir = TmpDir::new();
+    let e = hiis::Engine::open(&dir.0, small_cfg()).unwrap();
+    e.add_document("apple banana").unwrap(); // 0
+    e.add_document("apple apple apple").unwrap(); // 1
+    e.add_document("banana banana banana").unwrap(); // 2
+    e.commit().unwrap();
+
+    let plain = e.search("apple banana", 3).unwrap();
+    assert_eq!(plain.len(), 3);
+    let a = e.search("apple^10 banana", 3).unwrap();
+    assert_eq!(a[0].doc_id, 1);
+    let b = e.search("apple banana^10", 3).unwrap();
+    assert_eq!(b[0].doc_id, 2);
+}
+
+#[test]
+fn boost_zero_is_a_filter() {
+    let dir = TmpDir::new();
+    let e = hiis::Engine::open(&dir.0, small_cfg()).unwrap();
+    e.add_document("rust is fast").unwrap();
+    e.add_document("rust is safe").unwrap();
+    e.add_document("go is fast").unwrap();
+    e.commit().unwrap();
+
+    let all = e.search("fast", 10).unwrap();
+    // must-rust filters out doc 2, and adds nothing to the score of 0
+    let only_rust = e.search("fast +rust^0", 10).unwrap();
+    assert_eq!(ids(&only_rust), [0, 1]);
+    let base = all.iter().find(|h| h.doc_id == 0).unwrap();
+    assert_eq!(only_rust[0].score, base.score);
+    assert_eq!(only_rust[1].score, 0.0);
+}
+
+#[test]
+fn boosted_pruning_matches_exhaustive() {
+    let dir = TmpDir::new();
+    let e = hiis::Engine::open(&dir.0, small_cfg()).unwrap();
+    let words = ["red", "green", "blue", "cyan", "pink", "gold"];
+    let mut x = 7u32;
+    for _ in 0..300 {
+        let n = 3 + (x % 8);
+        let mut doc = String::new();
+        for _ in 0..n {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            doc.push_str(words[(x >> 16) as usize % words.len()]);
+            doc.push(' ');
+        }
+        e.add_document(&doc).unwrap();
+    }
+    e.commit().unwrap();
+
+    for q in ["red^3 green blue^0.25", "gold^7 pink^2 cyan", "red^5", "red^0 green^2", "blue^2 blue"] {
+        for k in [1, 5, 40] {
+            assert_eq!(e.search(q, k).unwrap(), e.search_unpruned(q, k).unwrap(), "{q} k={k}");
+        }
+    }
+}
+
+#[test]
+fn group_boost_scales_everything_inside() {
+    let (_d, e) = loaded(small_cfg());
+    let one = e.search("(quick fox)", 1).unwrap()[0];
+    let tripled = e.search("(quick fox)^3", 1).unwrap()[0];
+    assert_eq!(one.doc_id, tripled.doc_id);
+    assert!((tripled.score - one.score * 3.0).abs() < 1e-4);
+}
