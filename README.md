@@ -76,6 +76,7 @@ cargo run --release -- verify ./idx --deep
 cargo run --release -- backup ./idx ./idx-backup
 cargo run --release -- export ./idx dump.jsonl
 cargo run --release -- reindex ./idx ./idx-new
+cargo run --release -- terms  ./idx -k 20
 cargo run --release -- stats  ./idx
 ```
 

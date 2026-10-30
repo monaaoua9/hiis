@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* `Engine::top_terms` / `hiis terms`: most widespread indexed terms.
+* Randomised query tests (parser, pruned vs exhaustive, count, explain, pagination all agree on random syntax soup).
 * `Engine::count(query)`: number of matching documents without ranking, and `count=1` on the HTTP search for a `total`.
 * `Engine::for_each_document` and CLI `export` (JSON lines), `load`, `reindex <dir> <dest>` to rebuild an index with the current analyzer, for when analysis rules change.
 * `hiis serve`: std-only HTTP/1.1 + JSON API (`/api/v1/documents`, `search` with cursor pagination and snippets, `suggest`, `similar`, `explain`, `commit`, `stats`). Keep-alive, thread pool, optional bearer token, background commit so writes show up without calling commit. Embeddable as `hiis::server::Server`.

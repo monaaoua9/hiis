@@ -12,7 +12,7 @@
 //! wal_fsync is on). Deletes are applied immediately in memory and persisted by
 //! commit.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -284,6 +284,21 @@ impl Engine {
         let snapshot = self.shared.segments.read().unwrap().clone();
         let params = Bm25 { k1: self.shared.cfg.bm25_k1, b: self.shared.cfg.bm25_b };
         search::execute(&snapshot, q, k, params)
+    }
+
+    /// The `n` most widespread indexed terms (stems, as stored) with their document frequency.
+    /// Handy for deciding what belongs in a stopword list.
+    pub fn top_terms(&self, n: usize) -> Vec<(String, u64)> {
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        let mut df: HashMap<&str, u64> = HashMap::new();
+        for seg in &snapshot {
+            for e in seg.terms() {
+                *df.entry(e.term.as_str()).or_default() += e.doc_freq as u64;
+            }
+        }
+        let mut all: Vec<(&str, u64)> = df.into_iter().collect();
+        all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        all.into_iter().take(n).map(|(t, c)| (t.to_string(), c)).collect()
     }
 
     /// Number of documents matching the query, scoring aside. Walks every match, so on a

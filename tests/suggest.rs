@@ -80,3 +80,25 @@ fn corrected_query_finds_something() {
     assert_eq!(fixed, "inverted");
     assert!(!e.search(&fixed, 5).unwrap().is_empty());
 }
+
+#[test]
+fn top_terms_by_document_frequency() {
+    let dir = TmpDir::new();
+    let e = hiis::Engine::open(&dir.0, small_cfg()).unwrap();
+    e.add_document("alpha beta gamma").unwrap();
+    e.add_document("alpha beta").unwrap();
+    e.add_document("alpha delta delta delta").unwrap();
+    e.commit().unwrap();
+
+    let t = e.top_terms(10);
+    assert_eq!(t[0], ("alpha".to_string(), 3));
+    assert_eq!(t[1], ("beta".to_string(), 2));
+    // ties break alphabetically; delta counts documents, not occurrences
+    assert_eq!(t[2], ("delta".to_string(), 1));
+    assert_eq!(t[3], ("gamma".to_string(), 1));
+    assert_eq!(e.top_terms(2).len(), 2);
+    assert!(e.top_terms(0).is_empty());
+
+    e.force_merge().unwrap();
+    assert_eq!(e.top_terms(1), [("alpha".to_string(), 3)]);
+}

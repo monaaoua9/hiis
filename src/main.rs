@@ -26,6 +26,7 @@ usage:
   hiis export <dir> [file]        live documents as JSON lines {id, text} (stdout by default)
   hiis load   <dir> <file>        add documents from JSON lines (each needs a text field)
   hiis reindex <dir> <dest>       rebuild into a fresh index with the current analyzer (ids restart at 0)
+  hiis terms  <dir> [-k N]        most common indexed terms
   hiis stats  <dir>";
 
 fn main() -> ExitCode {
@@ -225,6 +226,16 @@ fn run(args: &[String]) -> Result<()> {
             target.add_documents(&batch)?;
             target.commit()?;
             println!("reindexed {} docs into {dest}", n + batch.len());
+        }
+        ("terms", opts) => {
+            let k = match opts {
+                [] => 20,
+                [flag, n] if flag == "-k" => n.parse().map_err(|_| bad_usage())?,
+                _ => return Err(bad_usage()),
+            };
+            for (term, df) in engine.top_terms(k) {
+                println!("{df:>9}  {term}");
+            }
         }
         ("stats", []) => {
             let s = engine.stats();
