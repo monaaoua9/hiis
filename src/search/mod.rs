@@ -77,11 +77,11 @@ pub fn execute_with(
     let total_len: u64 = segments.iter().map(|s| s.live_token_len()).sum();
 
     let mut expand = HashMap::new();
-    for c in &q.clauses {
-        if let Clause::Prefix(p) = &c.clause {
+    q.visit(&mut |c| {
+        if let Clause::Prefix(p) = c {
             expand.entry(p.clone()).or_insert_with(|| expand_prefix(segments, p));
         }
-    }
+    });
 
     let mut idf = HashMap::new();
     let wanted = q.terms().into_iter().chain(expand.values().flatten().map(|s| s.as_str()));
@@ -303,6 +303,7 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
                 union(lists)
             }
             Clause::Phrase(p) => eval_phrase(seg, &dels, p, ctx)?,
+            Clause::Group(g) => eval_segment(seg, g, ctx)?,
         };
         match qc.occur {
             Occur::Must => must.push(hits),

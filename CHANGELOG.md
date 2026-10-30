@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* Grouped queries: `(a OR b) AND NOT c`, nested to 16 levels. `AND`/`OR`/`NOT` keywords (capitals only) next to `+`/`-`.
 * Prefix queries (`compres*`), expanded against the sorted term dictionary of every segment.
 * `MergePolicy::max_merged_docs` (default 5M) caps merge size and so peak merge memory; segments at the cap are left alone.
 * Analyzer allocates once per token instead of three times (tokenizer no longer collects chars, stemmer takes the string by value).
