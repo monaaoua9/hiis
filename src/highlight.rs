@@ -283,7 +283,8 @@ mod tests {
         assert_eq!(s.text, "&lt;b&gt;<em>fox</em>&lt;/b&gt; &amp; &quot;co&quot;");
         let an = Analyzer::default();
         let q = Query::parse("fox", &an);
-        let raw = HighlightOpts { escape_html: false, pre: "[".into(), post: "]".into(), ..Default::default() };
+        let raw =
+            HighlightOpts { escape_html: false, pre: "[".into(), post: "]".into(), ..Default::default() };
         assert_eq!(highlight(&an, "a <fox>", &q, &raw).text, "a <[fox]>");
     }
 

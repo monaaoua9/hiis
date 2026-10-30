@@ -21,7 +21,7 @@ use crate::index::postings::PostingsCursor;
 use crate::index::segment::{bit_set, Segment};
 use crate::index::DocId;
 use bm25::Bm25;
-use query::{Clause, Occur, Query};
+use query::{Clause, Occur, Query, QueryClause};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hit {
@@ -73,9 +73,28 @@ pub fn execute_with(
         return Ok(Vec::new());
     }
 
+    let Some(ctx) = build_ctx(segments, q, bm25) else { return Ok(Vec::new()) };
+
+    let mut heap: BinaryHeap<Reverse<Hit>> = BinaryHeap::with_capacity(k + 1);
+    let disjunction = if prune { pure_disjunction(q) } else { None };
+
+    for seg in segments {
+        if let Some(terms) = &disjunction {
+            wand_segment(seg, terms, &ctx, k, &mut heap)?;
+            continue;
+        }
+        for (doc, score) in eval_segment(seg, q, &ctx)? {
+            offer(&mut heap, k, Hit { doc_id: seg.doc(doc).ext_id, score });
+        }
+    }
+    Ok(heap.into_sorted_vec().into_iter().map(|r| r.0).collect())
+}
+
+// None when there are no live documents at all
+fn build_ctx(segments: &[Arc<Segment>], q: &Query, bm25: Bm25) -> Option<Ctx> {
     let n_docs: u64 = segments.iter().map(|s| s.live_docs() as u64).sum();
     if n_docs == 0 {
-        return Ok(Vec::new());
+        return None;
     }
     let total_len: u64 = segments.iter().map(|s| s.live_token_len()).sum();
 
@@ -106,21 +125,7 @@ pub fn execute_with(
         let df: u64 = segments.iter().filter_map(|s| s.term(t)).map(|e| e.doc_freq as u64).sum();
         idf.insert(t.to_string(), Bm25::idf(n_docs, df));
     }
-    let ctx = Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand, fuzzy: fuzzy_map };
-
-    let mut heap: BinaryHeap<Reverse<Hit>> = BinaryHeap::with_capacity(k + 1);
-    let disjunction = if prune { pure_disjunction(q) } else { None };
-
-    for seg in segments {
-        if let Some(terms) = &disjunction {
-            wand_segment(seg, terms, &ctx, k, &mut heap)?;
-            continue;
-        }
-        for (doc, score) in eval_segment(seg, q, &ctx)? {
-            offer(&mut heap, k, Hit { doc_id: seg.doc(doc).ext_id, score });
-        }
-    }
-    Ok(heap.into_sorted_vec().into_iter().map(|r| r.0).collect())
+    Some(Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand, fuzzy: fuzzy_map })
 }
 
 // a prefix like "a*" would otherwise drag in half the dictionary; first terms in
@@ -321,31 +326,7 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
     let mut not = Vec::new();
 
     for qc in &q.clauses {
-        let mut hits = match &qc.clause {
-            Clause::Term(t) => eval_term(seg, &dels, t, ctx)?,
-            Clause::Prefix(p) => {
-                let mut lists = Vec::new();
-                for t in &ctx.expand[p] {
-                    lists.push(eval_term(seg, &dels, t, ctx)?);
-                }
-                union(lists)
-            }
-            Clause::Phrase(p) => eval_phrase(seg, &dels, p, None, ctx)?,
-            Clause::Near(p, slop) => eval_phrase(seg, &dels, p, Some(*slop), ctx)?,
-            Clause::Fuzzy(t, d) => {
-                let mut lists = Vec::new();
-                for (v, w) in &ctx.fuzzy[&(t.clone(), *d)] {
-                    let mut l = eval_term(seg, &dels, v, ctx)?;
-                    l.iter_mut().for_each(|x| x.1 *= w);
-                    lists.push(l);
-                }
-                union(lists)
-            }
-            Clause::Group(g) => eval_segment(seg, g, ctx)?,
-        };
-        if qc.boost != 1.0 {
-            hits.iter_mut().for_each(|x| x.1 *= qc.boost);
-        }
+        let hits = eval_clause(seg, &dels, qc, ctx)?;
         match qc.occur {
             Occur::Must => must.push(hits),
             Occur::Should => should.push(hits),
@@ -378,6 +359,35 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
         acc = difference(&acc, l);
     }
     Ok(acc)
+}
+
+fn eval_clause(seg: &Segment, dels: &[u64], qc: &QueryClause, ctx: &Ctx) -> Result<Scored> {
+    let mut hits = match &qc.clause {
+        Clause::Term(t) => eval_term(seg, dels, t, ctx)?,
+        Clause::Prefix(p) => {
+            let mut lists = Vec::new();
+            for t in &ctx.expand[p] {
+                lists.push(eval_term(seg, dels, t, ctx)?);
+            }
+            union(lists)
+        }
+        Clause::Phrase(p) => eval_phrase(seg, dels, p, None, ctx)?,
+        Clause::Near(p, slop) => eval_phrase(seg, dels, p, Some(*slop), ctx)?,
+        Clause::Fuzzy(t, d) => {
+            let mut lists = Vec::new();
+            for (v, w) in &ctx.fuzzy[&(t.clone(), *d)] {
+                let mut l = eval_term(seg, dels, v, ctx)?;
+                l.iter_mut().for_each(|x| x.1 *= w);
+                lists.push(l);
+            }
+            union(lists)
+        }
+        Clause::Group(g) => eval_segment(seg, g, ctx)?,
+    };
+    if qc.boost != 1.0 {
+        hits.iter_mut().for_each(|x| x.1 *= qc.boost);
+    }
+    Ok(hits)
 }
 
 fn eval_term(seg: &Segment, dels: &[u64], term: &str, ctx: &Ctx) -> Result<Scored> {

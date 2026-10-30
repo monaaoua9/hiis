@@ -91,7 +91,9 @@ pub fn expand(segments: &[Arc<Segment>], term: &str, dist: u32, limit: usize) ->
         .into_iter()
         .map(|(t, (d, df))| Candidate { term: t.to_string(), dist: d, doc_freq: df })
         .collect();
-    out.sort_by(|a, b| a.dist.cmp(&b.dist).then(b.doc_freq.cmp(&a.doc_freq)).then_with(|| a.term.cmp(&b.term)));
+    out.sort_by(|a, b| {
+        a.dist.cmp(&b.dist).then(b.doc_freq.cmp(&a.doc_freq)).then_with(|| a.term.cmp(&b.term))
+    });
     out.truncate(limit);
     out
 }

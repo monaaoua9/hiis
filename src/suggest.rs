@@ -26,7 +26,12 @@ fn doc_freq(segs: &[Arc<Segment>], term: &str) -> u64 {
 }
 
 // a word from a live document that analyses to `stem` and passes `accept`
-fn surface(segs: &[Arc<Segment>], an: &Analyzer, stem: &str, accept: impl Fn(&str) -> bool) -> Option<String> {
+fn surface(
+    segs: &[Arc<Segment>],
+    an: &Analyzer,
+    stem: &str,
+    accept: impl Fn(&str) -> bool,
+) -> Option<String> {
     let mut looked = 0;
     for seg in segs {
         let Some(entry) = seg.term(stem) else { continue };
