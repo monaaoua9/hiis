@@ -68,7 +68,9 @@ fn random_query(r: &mut Rng) -> String {
     let mut q = String::new();
     for _ in 0..n {
         q.push_str(r.pick(PIECES));
-        if r.next() % 3 != 0 {
+        #[allow(unknown_lints, clippy::manual_is_multiple_of)]
+        let space = r.next() % 3 != 0;
+        if space {
             q.push(' ');
         }
     }

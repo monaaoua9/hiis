@@ -61,6 +61,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// tokens per named field
+pub type FieldLens = Vec<(String, u32)>;
+
+/// (ext_id, token_len, text_len, field lengths), what a streamed segment is told about each doc
+pub type DocInfo = (DocId, u32, u32, FieldLens);
+
 #[derive(Debug, Clone)]
 pub struct DocEntry {
     pub ext_id: DocId,
@@ -732,11 +738,7 @@ impl StreamWriter {
 
     /// `docs` is (ext_id, token_len, text_len, field lengths) per doc; `text(i)` returns the
     /// raw stored bytes of doc i, which must be exactly `text_len` long.
-    pub fn finish(
-        mut self,
-        docs: &[(DocId, u32, u32, Vec<(String, u32)>)],
-        mut text: impl FnMut(usize) -> Result<Vec<u8>>,
-    ) -> Result<()> {
+    pub fn finish(mut self, docs: &[DocInfo], mut text: impl FnMut(usize) -> Result<Vec<u8>>) -> Result<()> {
         let terms_off = self.pos;
         let terms = std::mem::take(&mut self.terms);
         let n_terms = terms.len() as u32;

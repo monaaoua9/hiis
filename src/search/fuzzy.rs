@@ -145,6 +145,7 @@ mod tests {
     #[test]
     fn matches_a_plain_dp_on_random_words() {
         // reference: full matrix, no early exit
+        #[allow(clippy::needless_range_loop)]
         fn full(a: &[char], b: &[char]) -> u32 {
             let mut t = vec![vec![0u32; b.len() + 1]; a.len() + 1];
             for i in 0..=a.len() {

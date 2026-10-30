@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::index::postings::PostingsWriter;
-use crate::index::segment::{bit_set, BlockCache, Segment, StreamWriter};
+use crate::index::segment::{bit_set, BlockCache, DocInfo, Segment, StreamWriter};
 
 /// Tiered policy: bucket segments by size (log base `factor`), and when a
 /// bucket gets `factor` members, merge them. Small segments get merged often
@@ -85,7 +85,7 @@ impl MergePolicy {
 pub fn merge_segments(sources: &[Arc<Segment>], deleted: &[Vec<u64>], out: &Path) -> Result<()> {
     const GONE: u32 = u32::MAX;
 
-    let mut docs: Vec<(u64, u32, u32, Vec<(String, u32)>)> = Vec::new();
+    let mut docs: Vec<DocInfo> = Vec::new();
     let mut survivors: Vec<(usize, u32)> = Vec::new();
     let mut remap: Vec<Vec<u32>> = Vec::with_capacity(sources.len());
 

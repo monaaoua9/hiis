@@ -245,7 +245,7 @@ fn wait_for_request(st: &State, rd: &mut BufReader<TcpStream>, wr: &TcpStream) -
     wr.set_read_timeout(Some(Duration::from_millis(200)))?;
     loop {
         match rd.fill_buf() {
-            Ok(b) if b.is_empty() => return Ok(false),
+            Ok([]) => return Ok(false),
             Ok(_) => {
                 // a request is on its way: give the rest of it the full idle budget
                 wr.set_read_timeout(Some(st.cfg.idle_timeout))?;

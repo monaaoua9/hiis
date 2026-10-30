@@ -3,7 +3,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::analysis::Token;
 use crate::index::postings::PostingsWriter;
-use crate::index::segment::SegmentWriter;
+use crate::index::segment::{FieldLens, SegmentWriter};
 use crate::index::DocId;
 
 // flat per-term buffers: positions of doc i live at the running sum of freqs
@@ -43,7 +43,7 @@ pub struct Grouped {
 #[derive(Default)]
 pub struct SegmentBuilder {
     terms: HashMap<String, TermBuf, BuildHasherDefault<Fx>>,
-    docs: Vec<(DocId, u32, Vec<(String, u32)>, String)>,
+    docs: Vec<(DocId, u32, FieldLens, String)>,
     ram: usize,
 }
 
