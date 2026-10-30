@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* Server: fixed idle keep-alive connections starving new ones (a fixed worker pool let a few idle clients block everyone for the idle timeout). Each connection now has its own thread, capped by `ServerConfig::max_connections` (default 256, then 503 `OVERLOADED`); `--threads` became `--max-conns`. Idle connections notice shutdown within 200 ms.
+
 ## 0.2.0 - 2026-10-30
 
 Segment format is now v5. v4 indexes still open and are upgraded by merges, but older binaries can't read v5. Arabic terms changed (new stemmer): run `hiis reindex` on existing Arabic content.

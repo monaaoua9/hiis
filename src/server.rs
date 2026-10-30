@@ -14,15 +14,14 @@
 //! ```
 //!
 //! Success is `{"data": ..., "meta": ...}`, failure `{"error": {"code", "message"}}` with
-//! a stable code. Connections are keep-alive and served by a fixed pool of threads; a
+//! a stable code. Connections are keep-alive and each served by its own thread (up to `max_connections`, then 503); a
 //! background committer makes new documents searchable within `commit_interval`
 //! without the client having to call commit.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -38,7 +37,8 @@ const MAX_LIMIT: usize = 1000;
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub addr: String,
-    pub threads: usize,
+    /// simultaneous connections, each on its own thread; one more gets a 503
+    pub max_connections: usize,
     /// requests must carry `Authorization: Bearer <token>`; /health stays open
     pub token: Option<String>,
     pub max_body: usize,
@@ -51,7 +51,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             addr: "127.0.0.1:8080".into(),
-            threads: 8,
+            max_connections: 256,
             token: None,
             max_body: 16 << 20,
             commit_interval: Some(Duration::from_secs(1)),
@@ -65,6 +65,7 @@ struct State {
     cfg: ServerConfig,
     stop: AtomicBool,
     dirty: AtomicBool,
+    active: AtomicUsize,
 }
 
 pub struct Server {
@@ -78,22 +79,19 @@ impl Server {
         let listener = TcpListener::bind(&cfg.addr)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
-        let workers = cfg.threads.max(1);
         let commit_every = cfg.commit_interval;
-        let state =
-            Arc::new(State { engine, cfg, stop: AtomicBool::new(false), dirty: AtomicBool::new(false) });
+        let state = Arc::new(State {
+            engine,
+            cfg,
+            stop: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+        });
 
-        let (tx, rx) = mpsc::channel::<TcpStream>();
-        let rx = Arc::new(Mutex::new(rx));
         let mut threads = Vec::new();
-        for i in 0..workers {
-            let (st, rx) = (Arc::clone(&state), Arc::clone(&rx));
-            threads
-                .push(thread::Builder::new().name(format!("hiis-http-{i}")).spawn(move || worker(st, rx))?);
-        }
         let st = Arc::clone(&state);
         threads.push(
-            thread::Builder::new().name("hiis-accept".into()).spawn(move || accept_loop(st, listener, tx))?,
+            thread::Builder::new().name("hiis-accept".into()).spawn(move || accept_loop(st, listener))?,
         );
         if let Some(every) = commit_every {
             let st = Arc::clone(&state);
@@ -125,6 +123,10 @@ impl Server {
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
+        // connection threads notice the flag within one poll interval
+        while self.state.active.load(Ordering::Acquire) > 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -134,13 +136,24 @@ impl Drop for Server {
     }
 }
 
-fn accept_loop(st: Arc<State>, listener: TcpListener, tx: Sender<TcpStream>) {
+fn accept_loop(st: Arc<State>, listener: TcpListener) {
     while !st.stop.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok((s, _)) => {
+            Ok((mut s, _)) => {
                 let _ = s.set_nonblocking(false);
-                if tx.send(s).is_err() {
-                    return;
+                if st.active.fetch_add(1, Ordering::AcqRel) >= st.cfg.max_connections {
+                    st.active.fetch_sub(1, Ordering::AcqRel);
+                    let r = fail(503, "OVERLOADED", "too many connections");
+                    let _ = write_response(&mut s, &r, true);
+                    continue;
+                }
+                let st2 = Arc::clone(&st);
+                let spawned = thread::Builder::new().name("hiis-conn".into()).spawn(move || {
+                    let _ = serve_connection(&st2, s);
+                    st2.active.fetch_sub(1, Ordering::AcqRel);
+                });
+                if spawned.is_err() {
+                    st.active.fetch_sub(1, Ordering::AcqRel);
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(2)),
@@ -158,24 +171,6 @@ fn committer(st: Arc<State>, every: Duration) {
             if st.dirty.swap(false, Ordering::AcqRel) {
                 let _ = st.engine.commit();
             }
-        }
-    }
-}
-
-fn worker(st: Arc<State>, rx: Arc<Mutex<Receiver<TcpStream>>>) {
-    loop {
-        // the lock is only held while waiting for a connection, not while serving it
-        let next = rx.lock().unwrap().recv_timeout(Duration::from_millis(50));
-        match next {
-            Ok(stream) => {
-                let _ = serve_connection(&st, stream);
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                if st.stop.load(Ordering::Relaxed) {
-                    return;
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -219,12 +214,14 @@ enum ReadErr {
 }
 
 fn serve_connection(st: &State, stream: TcpStream) -> io::Result<()> {
-    stream.set_read_timeout(Some(st.cfg.idle_timeout))?;
     stream.set_nodelay(true)?;
     let mut rd = BufReader::new(stream.try_clone()?);
     let mut wr = stream;
 
     while !st.stop.load(Ordering::Relaxed) {
+        if !wait_for_request(st, &mut rd, &wr)? {
+            return Ok(());
+        }
         let (resp, close) = match read_request(&mut rd, st.cfg.max_body) {
             Ok(req) => {
                 let close = req.close;
@@ -239,6 +236,29 @@ fn serve_connection(st: &State, stream: TcpStream) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+// Waits for the first byte of the next request in short slices, so an idle connection
+// notices shutdown and the idle limit. False means: close.
+fn wait_for_request(st: &State, rd: &mut BufReader<TcpStream>, wr: &TcpStream) -> io::Result<bool> {
+    let since = Instant::now();
+    wr.set_read_timeout(Some(Duration::from_millis(200)))?;
+    loop {
+        match rd.fill_buf() {
+            Ok(b) if b.is_empty() => return Ok(false),
+            Ok(_) => {
+                // a request is on its way: give the rest of it the full idle budget
+                wr.set_read_timeout(Some(st.cfg.idle_timeout))?;
+                return Ok(true);
+            }
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                if st.stop.load(Ordering::Relaxed) || since.elapsed() >= st.cfg.idle_timeout {
+                    return Ok(false);
+                }
+            }
+            Err(_) => return Ok(false),
+        }
+    }
 }
 
 fn bad(status: u16, code: &str, msg: &str) -> ReadErr {
@@ -325,6 +345,7 @@ fn write_response(w: &mut impl Write, r: &Response, close: bool) -> io::Result<(
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
+        503 => "Service Unavailable",
         431 => "Request Header Fields Too Large",
         501 => "Not Implemented",
         505 => "HTTP Version Not Supported",

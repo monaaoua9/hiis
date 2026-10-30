@@ -17,7 +17,7 @@ struct Reply {
 fn start(cfg: ServerConfig) -> (TmpDir, Arc<Engine>, Server) {
     let dir = TmpDir::new();
     let engine = Arc::new(Engine::open(&dir.0, small_cfg()).unwrap());
-    let cfg = ServerConfig { addr: "127.0.0.1:0".into(), threads: 4, ..cfg };
+    let cfg = ServerConfig { addr: "127.0.0.1:0".into(), ..cfg };
     let server = Server::start(Arc::clone(&engine), cfg).unwrap();
     (dir, engine, server)
 }
@@ -302,4 +302,55 @@ fn fielded_documents_over_http() {
     assert_eq!(call(&srv, "POST", "/api/v1/documents", r#"{"fields": {"Bad Name": "x"}}"#).status, 400);
     assert_eq!(call(&srv, "POST", "/api/v1/documents", r#"{"fields": {"title": 5}}"#).status, 400);
     assert_eq!(call(&srv, "POST", "/api/v1/documents", r#"{"fields": []}"#).status, 400);
+}
+
+#[test]
+fn idle_keep_alive_connections_dont_starve_others() {
+    let cfg =
+        ServerConfig { max_connections: 64, idle_timeout: Duration::from_secs(30), ..Default::default() };
+    let (_d, _e, srv) = start(cfg);
+    // more idle keep-alive clients than workers, each having made one request
+    let mut idle: Vec<TcpStream> = (0..6).map(|_| conn(&srv)).collect();
+    for c in &mut idle {
+        assert_eq!(send(c, "GET", "/health", None, "").status, 200);
+    }
+    let t = std::time::Instant::now();
+    let mut fresh = conn(&srv);
+    fresh.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(send(&mut fresh, "GET", "/health", None, "").status, 200);
+    assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
+}
+
+#[test]
+fn large_document_and_many_clients() {
+    let (_d, e, srv) = start(ServerConfig { max_connections: 64, ..Default::default() });
+    let big = "word ".repeat(400_000);
+    let r = call(&srv, "POST", "/api/v1/documents?commit=true", &format!("{{\"text\": \"{big}\"}}"));
+    assert_eq!(r.status, 201);
+    std::thread::scope(|sc| {
+        for _ in 0..16 {
+            sc.spawn(|| {
+                for _ in 0..10 {
+                    assert_eq!(call(&srv, "GET", "/api/v1/search?q=word", "").status, 200);
+                }
+            });
+        }
+    });
+    assert_eq!(e.stats().live_docs, 1);
+}
+
+#[test]
+fn connections_over_the_cap_get_a_503() {
+    let (_d, _e, srv) = start(ServerConfig { max_connections: 3, ..Default::default() });
+    let mut held: Vec<TcpStream> = (0..3).map(|_| conn(&srv)).collect();
+    for c in &mut held {
+        assert_eq!(send(c, "GET", "/health", None, "").status, 200);
+    }
+    let mut extra = conn(&srv);
+    let r = read_reply(&mut extra);
+    assert_eq!((r.status, error_code(&r)), (503, "OVERLOADED"));
+    // a slot frees up when a client leaves
+    held.pop();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(call(&srv, "GET", "/health", "").status, 200);
 }

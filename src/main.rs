@@ -21,7 +21,7 @@ usage:
   hiis merge  <dir>               merge all segments into one
   hiis verify <dir> [--deep]      check posting lists (and stored text with --deep)
   hiis backup <dir> <dest>        consistent copy of the committed index
-  hiis serve  <dir> [--addr HOST:PORT] [--threads N] [--commit-ms N] [--token T] [--read-only]
+  hiis serve  <dir> [--addr HOST:PORT] [--max-conns N] [--commit-ms N] [--token T] [--read-only]
                                   HTTP API; the token can also come from HIIS_TOKEN
   hiis export <dir> [file]        live documents as JSON lines {id, text} (stdout by default)
   hiis load   <dir> <file>        add documents from JSON lines (each needs a text field)
@@ -164,7 +164,7 @@ fn run(args: &[String]) -> Result<()> {
                 match flag.as_str() {
                     "--addr" => cfg.addr = val.clone(),
                     "--token" => cfg.token = Some(val.clone()),
-                    "--threads" => cfg.threads = val.parse().map_err(|_| bad_usage())?,
+                    "--max-conns" => cfg.max_connections = val.parse().map_err(|_| bad_usage())?,
                     "--commit-ms" => {
                         let ms: u64 = val.parse().map_err(|_| bad_usage())?;
                         cfg.commit_interval = (ms > 0).then(|| Duration::from_millis(ms));
