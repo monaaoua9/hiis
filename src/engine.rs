@@ -32,6 +32,7 @@ use crate::search::explain::Explanation;
 use crate::search::page::{Cursor, Page};
 use crate::search::query::Query;
 use crate::search::{self, Hit};
+use crate::searcher::Searcher;
 use crate::similar;
 use crate::suggest::{self, Suggestion};
 use crate::verify::{self, VerifyReport};
@@ -350,6 +351,15 @@ impl Engine {
         let mut all: Vec<(&str, u64)> = df.into_iter().collect();
         all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         all.into_iter().take(n).map(|(t, c)| (t.to_string(), c)).collect()
+    }
+
+    /// A frozen view of the committed index; see [`Searcher`].
+    pub fn searcher(&self) -> Searcher {
+        Searcher {
+            segments: self.shared.segments.read().unwrap().clone(),
+            analyzer: self.shared.analyzer.clone(),
+            bm25: Bm25 { k1: self.shared.cfg.bm25_k1, b: self.shared.cfg.bm25_b },
+        }
     }
 
     /// Number of documents matching the query, scoring aside. Walks every match, so on a
