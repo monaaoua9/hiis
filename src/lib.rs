@@ -24,6 +24,7 @@ pub mod error;
 pub mod highlight;
 pub mod index;
 pub mod search;
+pub mod similar;
 pub mod suggest;
 pub mod verify;
 mod wal;

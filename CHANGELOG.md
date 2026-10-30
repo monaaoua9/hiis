@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* `Engine::similar` / `hiis similar`: more-like-this. The document becomes a weighted OR query of its 25 highest tf-idf terms (terms nobody else has are ignored), run through the normal pruned search.
 * `Engine::search_page` with a text `Cursor`: next-k-after-this-hit pagination instead of offsets; pruning still applies. Pages concatenate to exactly the full ranking.
 * `Engine::verify(deep)` / `hiis verify`: walks every posting list (order, counts, positions, per-document token totals) and, with `--deep`, re-analyses all stored text. Catches damage that still passes the segment checksum.
 * `Engine::backup(dest)` / `hiis backup`: consistent copy of the committed index while searches and writes continue; merges wait for the copy. The result opens as an independent index.

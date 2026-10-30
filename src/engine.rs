@@ -31,6 +31,7 @@ use crate::search::explain::Explanation;
 use crate::search::page::{Cursor, Page};
 use crate::search::query::Query;
 use crate::search::{self, Hit};
+use crate::similar;
 use crate::suggest::{self, Suggestion};
 use crate::verify::{self, VerifyReport};
 use crate::wal::Wal;
@@ -296,6 +297,18 @@ impl Engine {
         Ok(Page { hits, next })
     }
 
+    /// Documents that look like document `id`, best first, the document itself left out.
+    /// Empty if `id` doesn't exist.
+    pub fn similar(&self, id: DocId, k: usize) -> Result<Vec<Hit>> {
+        let Some(text) = self.get(id) else { return Ok(Vec::new()) };
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        let q = similar::query_for(&snapshot, &self.shared.analyzer, &text, similar::MAX_TERMS);
+        let mut hits = self.search_query(&q, k + 1)?;
+        hits.retain(|h| h.doc_id != id);
+        hits.truncate(k);
+        Ok(hits)
+    }
+
     /// Same as `search` but with pruning off. Results must match exactly; kept public for tests and benchmarks.
     #[doc(hidden)]
     pub fn search_unpruned(&self, query: &str, k: usize) -> Result<Vec<Hit>> {
@@ -370,12 +383,7 @@ impl Engine {
         let next_doc = self.shared.next_doc.load(Ordering::Relaxed);
         let next_seg = self.shared.next_seg.load(Ordering::Relaxed);
 
-        let mut manifest = format!(
-            "next_doc {next_doc}
-next_seg {next_seg}
-flushed_upto {next_doc}
-"
-        );
+        let mut manifest = format!("next_doc {next_doc}\nnext_seg {next_seg}\nflushed_upto {next_doc}\n");
         for s in &segs {
             s.persist_deletes(&self.shared.dir)?;
             for (from, to) in [
@@ -390,11 +398,7 @@ flushed_upto {next_doc}
                     Err(e) => return Err(e.into()),
                 }
             }
-            manifest.push_str(&format!(
-                "segment {}
-",
-                s.id()
-            ));
+            manifest.push_str(&format!("segment {}\n", s.id()));
         }
         // last, so a half-finished copy is never mistaken for an index
         write_atomic(&dest.join(MANIFEST), manifest.as_bytes())

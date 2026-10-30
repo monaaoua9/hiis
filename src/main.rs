@@ -8,6 +8,7 @@ const USAGE: &str = "\
 usage:
   hiis index  <dir> <file>        one document per non-empty line
   hiis search <dir> <query> [-k N]
+  hiis similar <dir> <doc-id> [-k N]
   hiis explain <dir> <query> <doc-id>
   hiis complete <dir> <prefix> [-k N]
   hiis get    <dir> <doc-id>
@@ -75,6 +76,19 @@ fn run(args: &[String]) -> Result<()> {
                 if let Some(q) = engine.did_you_mean(query) {
                     println!("did you mean: {q}");
                 }
+            }
+        }
+        ("similar", [id, opts @ ..]) => {
+            let id = id.parse().map_err(|_| bad_usage())?;
+            let k = match opts {
+                [] => 5,
+                [flag, n] if flag == "-k" => n.parse().map_err(|_| bad_usage())?,
+                _ => return Err(bad_usage()),
+            };
+            for h in engine.similar(id, k)? {
+                let text = engine.get(h.doc_id).unwrap_or_default();
+                let head: String = text.chars().take(100).collect();
+                println!("{:>7.3}  #{:<6} {}", h.score, h.doc_id, head.replace('\n', " "));
             }
         }
         ("explain", [query, id]) => {
