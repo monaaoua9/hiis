@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* `hiis serve --read-only` serves an existing index without taking the write lock.
 * `Config::read_only`: open an index for searching only. Shared lock so several readers can use one directory, nothing on disk is created or removed, the log is ignored, writes return an error.
 * `Engine::top_terms` / `hiis terms`: most widespread indexed terms.
 * Randomised query tests (parser, pruned vs exhaustive, count, explain, pagination all agree on random syntax soup).

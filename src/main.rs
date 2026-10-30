@@ -21,7 +21,7 @@ usage:
   hiis merge  <dir>               merge all segments into one
   hiis verify <dir> [--deep]      check posting lists (and stored text with --deep)
   hiis backup <dir> <dest>        consistent copy of the committed index
-  hiis serve  <dir> [--addr HOST:PORT] [--threads N] [--commit-ms N] [--token T]
+  hiis serve  <dir> [--addr HOST:PORT] [--threads N] [--commit-ms N] [--token T] [--read-only]
                                   HTTP API; the token can also come from HIIS_TOKEN
   hiis export <dir> [file]        live documents as JSON lines {id, text} (stdout by default)
   hiis load   <dir> <file>        add documents from JSON lines (each needs a text field)
@@ -46,7 +46,8 @@ fn bad_usage() -> hiis::Error {
 
 fn run(args: &[String]) -> Result<()> {
     let [cmd, dir, rest @ ..] = args else { return Err(bad_usage()) };
-    let engine = Engine::open(dir, Config::default())?;
+    let read_only = cmd == "serve" && rest.iter().any(|a| a == "--read-only");
+    let engine = Engine::open(dir, Config { read_only, ..Config::default() })?;
 
     match (cmd.as_str(), rest) {
         ("index", [file]) => {
@@ -156,6 +157,9 @@ fn run(args: &[String]) -> Result<()> {
             let mut cfg = ServerConfig { token: std::env::var("HIIS_TOKEN").ok(), ..Default::default() };
             let mut it = opts.iter();
             while let Some(flag) = it.next() {
+                if flag == "--read-only" {
+                    continue;
+                }
                 let val = it.next().ok_or_else(bad_usage)?;
                 match flag.as_str() {
                     "--addr" => cfg.addr = val.clone(),
