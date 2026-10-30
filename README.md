@@ -127,6 +127,13 @@ convergence, concurrent indexing + searching, and the directory lock.
 
 `tests/robustness.rs` adds seeded randomised round-trips for every codec and posting list (checked against a naive model), garbage/mutation tests that fix the CRC so corrupt data reaches the decoders, orphan-file cleanup, and a real crash test that `kill`s the CLI mid-indexing five times and audits that the recovered index is a gap-free prefix with intact text.
 
+**About the numbers.** Everything here was measured on one weak development laptop
+(i5-8365U, 8 GB RAM, Windows 11) that usually had several terminals open and a
+nearly full system disk. That noise is large: the same code has measured 5.9k and 12.9k
+docs/s on different days. So old-versus-new comparisons are run interleaved in one session
+and reported as a median with min-max of three runs, and absolute figures are a lower bound,
+not what a quiet machine would give.
+
 Sample bench run (synthetic skewed corpus, 100k docs, one noisy Windows
 machine, so treat as order of magnitude): ~13k docs/s ingest (run-to-run spread; the WAL accounts for under 3% of it), ~1.7 s to merge
 down to one segment, ~2.3 ms for single-term queries matching ~95% of docs,
