@@ -82,6 +82,12 @@ fn main() -> hiis::Result<()> {
         format!("{} {} {}", vocab[0], vocab[3000], vocab[9000]),
         format!("+{} +{}", vocab[2], vocab[3]),
         format!("\"{} {}\"", vocab[0], vocab[1]),
+        // newer syntax: these take the exhaustive path, so both columns are the same work
+        format!("{}~1", vocab[1]),
+        format!("{}*", &vocab[500][..4]),
+        format!("\"{} {}\"~5", vocab[0], vocab[1]),
+        format!("({} OR {}) AND {}", vocab[1], vocab[500], vocab[2]),
+        format!("{}^3 {}", vocab[1], vocab[500]),
     ];
     println!("{:<30} {:>12} {:>12}", "query", "pruned us", "exhaustive us");
     for q in &queries {

@@ -1,6 +1,6 @@
 # hiis: benchmarks
 
-Measured 2026-10-29.
+Measured 2026-10-30, on a laptop that was busy with other work (several terminals, a browser), so absolute numbers are well below the previous run of this file: the same ingest code measured 12.9k docs/s on 10-29 and 5.9-7.7k docs/s now. Treat the **old vs new** comparison as the result and the absolute values as a lower bound.
 
 | | |
 |---|---|
@@ -9,37 +9,56 @@ Measured 2026-10-29.
 | OS | Windows 11 |
 | Toolchain | Rust 1.99.1, `--release` |
 
-## Indexing and query timing
+## Method
 
 ```
 cargo run --release --example bench -- 100000
 ```
 
-A synthetic skewed corpus of 100,000 documents (20,000 distinct terms, 67.0 MB of raw text). Three back-to-back runs; median with min–max in brackets.
+A synthetic skewed corpus of 100,000 documents (20,000 distinct terms, 67.0 MB of raw text). Six runs in total, **interleaved**: new build, old build, new, old, new, old, so a slow minute hits both. "Old" is commit `2d6649a` (before the query language, fields and format v5), "new" is 0.2.1. Tables show the median of three with min-max in brackets. Queries are timed over 100 repetitions each, top 10.
 
-| | |
-|---|---|
-| ingest | 12,921 docs/s (12,485 – 13,275) |
-| merge down to one segment | 1.68 s (1.66 – 1.79) |
-| index on disk | 70.9 MB, including the stored text |
+## Indexing
 
-Query latency in µs, MaxScore pruning against exhaustive scoring on the same index:
+| | old | new |
+|---|---|---|
+| ingest, docs/s | 6,086 (6,086 - 7,733) | 5,905 (5,905 - 7,662) |
+| merge down to one segment | 3.66 s (2.35 - 3.98) | 3.29 s (3.05 - 5.99) |
+| index on disk | 70.9 MB | 71.0 MB |
 
-| query | pruned | exhaustive |
-|---|---:|---:|
-| one very common term | 2,311 (2,009 – 2,456) | 2,662 (2,393 – 2,895) |
-| two terms, one rare | 256 (233 – 304) | 1,969 (1,679 – 2,172) |
-| three terms, mixed frequencies | 144 (130 – 148) | 3,432 (3,014 – 3,692) |
-| two required terms (`+a +b`) | 1,741 (1,637 – 2,071) | 1,702 (1,701 – 2,005) |
-| phrase of two common terms | 8,773 (8,642 – 10,751) | 9,029 (8,573 – 10,980) |
+Ingest is 1-4% slower in every pair (7,662 vs 7,733; 6,005 vs 6,261; 5,905 vs 6,086): each document now goes through the fielded-document check and carries a per-field length list. That is small but it showed up in all three pairs, so I'm reporting it as real. Merge times swing too much between runs (2.4 - 6.0 s) to say anything. The format v5 field section costs about a byte per plain document.
 
-## What these say
+## Queries that existed before
 
-- Pruning pays off when terms differ a lot in frequency: about 8× on the two-term query and about 24× on the three-term one. For a single term that matches most documents there's little to skip, so the gain is small (about 13%).
-- Required-term and phrase queries use the exhaustive path by design, so the two columns match there. Differences in those rows are noise.
-- Ingest here is higher than the 3–9k docs/s in the README. That text came from a noisier machine state; three runs now agree within about 6%, so I trust this file for the current code.
+Latency in µs, MaxScore pruning against exhaustive scoring on the same index.
 
-## Not rerun today
+| query | old pruned | new pruned | new exhaustive |
+|---|---:|---:|---:|
+| one very common term | 5,619 | 6,520 | 6,851 |
+| two terms, one rare | 507 | 440 | 5,889 |
+| three terms, mixed frequencies | 283 | 271 | 8,865 |
+| two required terms (`+a +b`) | 4,607 | 6,585 | 6,513 |
+| phrase of two common terms | 21,422 | 20,723 | 19,149 |
 
-- **Ranking quality on SciFact** (nDCG@10 0.6827) and the **comparison against Tantivy** in the README need the BEIR datasets and a separate crate build, and the comparison takes minutes per collection. I didn't repeat them; treat those README numbers as an earlier run on this machine, with the "20% or more between runs" caveat the README already gives.
-- This file compares hiis with nothing else.
+The min-max ranges of old and new overlap on every row; the machine was too noisy to separate them, so I see no regression and no gain. The two-term and three-term pruning wins are intact: about 13x and 33x against exhaustive on the same build.
+
+## New query kinds
+
+| query | new |
+|---|---:|
+| fuzzy `w1x1~1` (scans every term starting with `w`) | 6,298 |
+| prefix `w500*` | 862 |
+| proximity `"w0x0 w1x1"~5` | 50,653 |
+| group `(w1x1 OR w500x15) AND w2x2` | 8,739 |
+| boosted OR `w1x1^3 w500x15` | 1,175 (exhaustive: 5,669) |
+
+These did not exist in the old build, so there is nothing to compare against. What they show:
+
+- Boosts keep MaxScore pruning (a boosted plain OR is still about 5x faster than exhaustive), because the boost multiplies the bounds.
+- Fuzzy on a short word is as expensive as a common term here because the synthetic vocabulary has 20,000 terms that all start with `w`; with a real vocabulary the first-letter restriction cuts the scan far more.
+- Proximity is the slowest query: it decodes positions for both very common terms and sorts them per document. Phrase and group queries are exhaustive by design.
+
+## Not measured
+
+- Ranking quality on SciFact (nDCG@10 0.6827) and the Tantivy comparison in the README need the BEIR datasets and a separate build. They were not rerun today and come from an earlier session.
+- Server throughput. The tests cover correctness under concurrent clients, not requests per second.
+- Field-restricted queries (`title:x`) and per-field length scoring were not benchmarked; the synthetic corpus has no fields.
