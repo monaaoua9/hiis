@@ -8,6 +8,7 @@ const USAGE: &str = "\
 usage:
   hiis index  <dir> <file>        one document per non-empty line
   hiis search <dir> <query> [-k N]
+  hiis complete <dir> <prefix> [-k N]
   hiis get    <dir> <doc-id>
   hiis delete <dir> <doc-id>
   hiis merge  <dir>               merge all segments into one
@@ -67,6 +68,21 @@ fn run(args: &[String]) -> Result<()> {
                 println!("{:>2}. {:>7.3}  #{:<6} {}", rank + 1, h.score, h.doc_id, snip.replace('\n', " "));
             }
             println!("-- {} hits in {us}us", hits.len());
+            if hits.is_empty() {
+                if let Some(q) = engine.did_you_mean(query) {
+                    println!("did you mean: {q}");
+                }
+            }
+        }
+        ("complete", [prefix, opts @ ..]) => {
+            let k = match opts {
+                [] => 10,
+                [flag, n] if flag == "-k" => n.parse().map_err(|_| bad_usage())?,
+                _ => return Err(bad_usage()),
+            };
+            for s in engine.complete(prefix, k) {
+                println!("{:<24} {}", s.text, s.doc_freq);
+            }
         }
         ("get", [id]) => {
             let id = id.parse().map_err(|_| bad_usage())?;

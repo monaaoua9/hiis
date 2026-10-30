@@ -29,6 +29,7 @@ use crate::index::DocId;
 use crate::search::bm25::Bm25;
 use crate::search::query::Query;
 use crate::search::{self, Hit};
+use crate::suggest::{self, Suggestion};
 use crate::wal::Wal;
 
 const MANIFEST: &str = "MANIFEST";
@@ -293,6 +294,20 @@ impl Engine {
     pub fn get(&self, id: DocId) -> Option<String> {
         let segs = self.shared.segments.read().unwrap();
         segs.iter().find_map(|s| s.text_of(id))
+    }
+
+    /// Autocomplete: up to `limit` words starting with `prefix`, most widespread first.
+    /// Counts include documents that are deleted but not yet merged away.
+    pub fn complete(&self, prefix: &str, limit: usize) -> Vec<Suggestion> {
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        suggest::complete(&snapshot, &self.shared.analyzer, prefix, limit)
+    }
+
+    /// The query with unknown words swapped for the closest indexed ones, or None when every
+    /// word is known (or nothing close enough exists).
+    pub fn did_you_mean(&self, query: &str) -> Option<String> {
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        suggest::correct_query(&snapshot, &self.shared.analyzer, query)
     }
 
     /// The best `opts.max_chars` of the document for this query, matches marked. None if the
