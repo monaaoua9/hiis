@@ -86,7 +86,7 @@ fn backup_opens_as_an_independent_index() {
 
     // ids keep counting from where the source was
     let id = b.add_document("new").unwrap();
-    assert!(id >= CORPUS.len() as u64 + 1);
+    assert!(id > CORPUS.len() as u64);
 }
 
 #[test]

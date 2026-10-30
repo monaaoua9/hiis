@@ -9,7 +9,12 @@ A full-text search storage engine in safe Rust, with no dependencies.
 * Posting-list compression: Frame-of-Reference bit-packing + variable-byte, with skip tables
 * Immutable, checksummed segments; tiered background merging; tombstone deletes
 * MaxScore top-k pruning (bit-identical to exhaustive scoring)
-* Okapi BM25 ranking, `+must -not "phrase" prefix*` query syntax, top-k heap
+* Okapi BM25 ranking with a real query language: `+must -not "phrase" prefix*`, groups and `AND`/`OR`/`NOT`, fuzzy `word~`, proximity `"a b"~3`, boosts `title^2`
+* Snippets with highlighted matches, autocomplete, did-you-mean, more-like-this, per-document score explanations
+* Cursor pagination, hit counts, document export / reindex
+* `verify` (checks posting lists and stored text) and online `backup`
+* HTTP/JSON server (`hiis serve`) built on `std::net`, with keep-alive, bearer-token auth and background commits
+* Arabic: orthographic folding, light stemmer, stopwords
 * Write-ahead log with crash replay (optional fsync per add, or per batch via `add_documents`)
 * Streamed merges, a merge size cap (`max_merged_docs`), and segments past `resident_limit` read from disk instead of RAM
 * Exclusive directory lock; checksum-valid-but-corrupt segments give errors, not panics
@@ -30,19 +35,71 @@ for hit in engine.search("\"quick brown\" -dog", 10)? {
 }
 ```
 
+Query syntax:
+
+```
+rust search              either term may match, scores add up
++rust +search -java      required / excluded
+rust AND search NOT go   keywords work too (capitals only)
+(rust OR go) -java       groups, nested
+"inverted index"         exact phrase
+"inverted index"~3       proximity: within 3 positions of a phrase, any order
+compres*                 prefix
+serch~  serch~2          fuzzy, up to 1-2 edits (same first letter)
+title^2  (a b)^0.5       boost; ^0 makes a clause a pure filter
+```
+
+Beyond `search`:
+
+```rust
+engine.search_page("rust", 10, None)?;          // Page { hits, next: Option<Cursor> }
+engine.highlight(id, "rust", &HighlightOpts::default());  // Snippet with <em>..</em>
+engine.complete("compre", 5);                    // ["compression", ..]
+engine.did_you_mean("postng lsts");              // Some("posting lists")
+engine.similar(id, 5)?;                          // more like this
+engine.explain("rust -java", id)?;               // why it scored like that, or why it is missing
+engine.count("rust")?;                           // matches, unranked
+engine.verify(false);                            // integrity check
+engine.backup("./idx-backup")?;                  // consistent copy while serving
+```
+
 CLI:
 
 ```
 cargo run --release -- index  ./idx data/sample.txt
 cargo run --release -- search ./idx "\"posting lists\""  -k 5
 cargo run --release -- search ./idx "+segment merging -posting"
+cargo run --release -- complete ./idx compre
+cargo run --release -- similar ./idx 3
+cargo run --release -- explain ./idx "posting lists" 3
+cargo run --release -- verify ./idx --deep
+cargo run --release -- backup ./idx ./idx-backup
+cargo run --release -- export ./idx dump.jsonl
+cargo run --release -- reindex ./idx ./idx-new
 cargo run --release -- stats  ./idx
 ```
+
+HTTP:
+
+```
+HIIS_TOKEN=secret cargo run --release -- serve ./idx --addr 127.0.0.1:8080
+
+curl -H "Authorization: Bearer secret" -X POST localhost:8080/api/v1/documents \
+     -d '{"documents": ["posting lists are compressed", "segment merging"]}'
+curl -H "Authorization: Bearer secret" "localhost:8080/api/v1/search?q=postng~&highlight=1&count=1"
+```
+
+Routes: `POST /api/v1/documents`, `GET|DELETE /api/v1/documents/{id}`, `GET /api/v1/documents/{id}/similar`,
+`GET /api/v1/documents/{id}/explain?q=`, `GET /api/v1/search`, `GET /api/v1/suggest`, `POST /api/v1/commit`,
+`GET /api/v1/stats`, `GET /health`. Responses are `{"data", "meta"}` or `{"error": {"code", "message"}}`;
+search pages with `cursor=` / `meta.next_cursor`. New documents become searchable within a second without a
+commit call (`--commit-ms` to change that). The server speaks plain HTTP: put a TLS proxy in front of it
+for anything that leaves the machine.
 
 ## Test and measure
 
 ```
-cargo test                                   # 63 unit + 20 integration + 1 disk-backed + 8 robustness + doctest
+cargo test                                   # ~200: unit, engine, query syntax, server, backup/verify, robustness
 cargo run --release --example bench -- 100000 [threads]
 ```
 
@@ -106,6 +163,8 @@ cd bench-compare && cargo run --release -- path/to/trec-covid 8
 src/analysis/   tokenizer, stemmer, stopwords, Analyzer
 src/codec/      vbyte, bitpack (FoR), crc32
 src/index/      postings (writer + cursor), builder, segment, merge
-src/search/     bm25, query parser, execution
+src/search/     bm25, query parser, execution, fuzzy, explain, pagination
+src/highlight.rs, suggest.rs, similar.rs, verify.rs   snippets, autocomplete, more-like-this, integrity check
+src/json.rs, server.rs   JSON and the HTTP front end
 src/engine.rs   write path, manifest, merger thread, snapshots
 ```

@@ -89,6 +89,18 @@ Phrase clauses score with the phrase frequency as `tf` and the sum of the terms'
 
 Plain multi-term queries (`a b c`) skip documents that cannot reach the current k-th score. Each skip-table entry stores the block's `max_tf`, which gives a score upper bound (BM25 rises with tf and falls with length, so length 0 is the ceiling). Terms are sorted by their bound; the cheap prefix whose bounds add up to less than the k-th score cannot produce a top-k doc by itself, so only the remaining terms drive the iteration and the prefix is probed with `advance` for the docs they find (a doc is dropped early once its partial score plus the remaining bounds falls below the threshold). A single term skips whole 128-doc blocks using the block bound. Pruning only drops docs whose bound is strictly below the heap minimum, and survivors are summed in clause order, so results are **bit-identical** to exhaustive scoring (a randomized test compares 180 query/k combinations across merged segments with deletes). MUST/NOT/phrase queries use the exhaustive path.
 
+## Query evaluation extras
+
+Every clause kind is evaluated into a doc-sorted `(doc, score)` list per segment, so new kinds slot
+in without touching the combine step: prefixes and fuzzy terms expand against the dictionary and
+union their variants (fuzzy weights a variant by `1 - edits / (len + 1)`), `"a b"~n` runs the phrase
+leapfrog and then slides a window over the positions (each position shifted back by its offset in
+the phrase, so an exact phrase is a window of width 0 and a swap costs 2), groups recurse into the
+same function. Boosts multiply a clause's list; MaxScore multiplies its per-term bounds the same way,
+so pruned and exhaustive results stay bit-identical. Pagination passes the previous last hit down
+as an exclusive bound that `offer` enforces. `explain` re-runs each clause against one document with
+the same statistics, so its total is the score search reports.
+
 ## Known limits (deliberate scope)
 
 * Segment files up to `Config::resident_limit` (512 MB) are held in memory; bigger
@@ -103,4 +115,12 @@ Plain multi-term queries (`a b c`) skip documents that cannot reach the current 
   these queries skip pruning.
 * A merge streams its output to disk, but it still keeps the merged term and doc
   tables in memory; `max_merged_docs` bounds that.
-* English stemmer/stopwords only; Arabic gets orthographic folding but no stemming.
+* English uses Porter; Arabic uses a light stemmer (strip article/clitic prefixes and common
+  suffixes, never below three letters), no root extraction. Changing analyzer rules changes the
+  terms, so existing indexes need `hiis reindex`.
+* Fuzzy matching only considers terms with the same first letter, which keeps it to one
+  dictionary range per query; and it compares against stems, not surface words.
+* Autocomplete maps stems back to words by opening up to 8 documents per suggestion, one word per stem.
+* Pagination cursors are the last hit, so concurrent writes can shift idf and make pages
+  overlap a little; they never move backwards.
+* The HTTP server is plain HTTP/1.1 (no TLS, no chunked request bodies).
