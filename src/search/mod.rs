@@ -9,6 +9,7 @@
 //! so scores don't depend on how documents happen to be split into segments.
 
 pub mod bm25;
+pub mod fuzzy;
 pub mod query;
 
 use std::cmp::{Ordering, Reverse};
@@ -49,6 +50,8 @@ struct Ctx {
     idf: HashMap<String, f32>,
     // prefix -> the indexed terms it stands for (same list for every segment, so idf is consistent)
     expand: HashMap<String, Vec<String>>,
+    // (term, edits) -> variants with a weight that drops as they get further from the typed word
+    fuzzy: HashMap<(String, u32), Vec<(String, f32)>>,
 }
 
 type Scored = Vec<(u32, f32)>;
@@ -83,8 +86,19 @@ pub fn execute_with(
         }
     });
 
+    let mut fuzzy_map: HashMap<(String, u32), Vec<(String, f32)>> = HashMap::new();
+    q.visit(&mut |c| {
+        if let Clause::Fuzzy(t, d) = c {
+            fuzzy_map.entry((t.clone(), *d)).or_insert_with(|| expand_fuzzy(segments, t, *d));
+        }
+    });
+
     let mut idf = HashMap::new();
-    let wanted = q.terms().into_iter().chain(expand.values().flatten().map(|s| s.as_str()));
+    let wanted = q
+        .terms()
+        .into_iter()
+        .chain(expand.values().flatten().map(|s| s.as_str()))
+        .chain(fuzzy_map.values().flatten().map(|v| v.0.as_str()));
     for t in wanted {
         if idf.contains_key(t) {
             continue;
@@ -92,7 +106,7 @@ pub fn execute_with(
         let df: u64 = segments.iter().filter_map(|s| s.term(t)).map(|e| e.doc_freq as u64).sum();
         idf.insert(t.to_string(), Bm25::idf(n_docs, df));
     }
-    let ctx = Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand };
+    let ctx = Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand, fuzzy: fuzzy_map };
 
     let mut heap: BinaryHeap<Reverse<Hit>> = BinaryHeap::with_capacity(k + 1);
     let disjunction = if prune { pure_disjunction(q) } else { None };
@@ -130,6 +144,19 @@ fn expand_prefix(segments: &[Arc<Segment>], prefix: &str) -> Vec<String> {
     out.dedup();
     out.truncate(MAX_EXPANSION);
     out
+}
+
+const MAX_FUZZY_TERMS: usize = 64;
+
+fn expand_fuzzy(segments: &[Arc<Segment>], term: &str, dist: u32) -> Vec<(String, f32)> {
+    let len = term.chars().count().max(1) as f32;
+    fuzzy::expand(segments, term, dist, MAX_FUZZY_TERMS)
+        .into_iter()
+        .map(|c| {
+            let w = 1.0 - c.dist as f32 / (len + 1.0);
+            (c.term, w)
+        })
+        .collect()
 }
 
 fn offer(heap: &mut BinaryHeap<Reverse<Hit>>, k: usize, hit: Hit) {
@@ -303,6 +330,15 @@ fn eval_segment(seg: &Segment, q: &Query, ctx: &Ctx) -> Result<Scored> {
                 union(lists)
             }
             Clause::Phrase(p) => eval_phrase(seg, &dels, p, ctx)?,
+            Clause::Fuzzy(t, d) => {
+                let mut lists = Vec::new();
+                for (v, w) in &ctx.fuzzy[&(t.clone(), *d)] {
+                    let mut l = eval_term(seg, &dels, v, ctx)?;
+                    l.iter_mut().for_each(|x| x.1 *= w);
+                    lists.push(l);
+                }
+                union(lists)
+            }
             Clause::Group(g) => eval_segment(seg, g, ctx)?,
         };
         match qc.occur {

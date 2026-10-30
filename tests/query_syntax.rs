@@ -47,3 +47,43 @@ fn grouped_query_scores_survive_merging() {
     let after = e.search("(quick OR lazy) AND dog", 10).unwrap();
     assert_eq!(before, after);
 }
+
+#[test]
+fn fuzzy_finds_typos() {
+    let (_d, e) = loaded(small_cfg());
+    // quick: docs 0, 1
+    assert_eq!(sorted_ids(&e.search("quikc~", 10).unwrap()), [0, 1]);
+    assert_eq!(sorted_ids(&e.search("qiuck~1", 10).unwrap()), [0, 1]);
+    // two edits needs an explicit ask or a long enough word
+    assert!(e.search("quack~0", 10).unwrap().is_empty());
+    assert_eq!(sorted_ids(&e.search("compresed~", 10).unwrap()), [3]);
+    // first letter has to be right
+    assert!(e.search("kuick~2", 10).unwrap().is_empty());
+}
+
+#[test]
+fn fuzzy_matches_exact_and_variant_in_one_doc() {
+    let (_d, e) = loaded(small_cfg());
+    e.add_document("segment segmant").unwrap();
+    e.commit().unwrap();
+    let hits = e.search("segment~1", 10).unwrap();
+    assert!(hits.len() >= 2);
+    assert!(hits.iter().any(|h| h.doc_id == 8));
+}
+
+#[test]
+fn fuzzy_composes_with_other_clauses() {
+    let (_d, e) = loaded(small_cfg());
+    assert_eq!(sorted_ids(&e.search("+quikc~ +lazy", 10).unwrap()), [0]);
+    assert_eq!(sorted_ids(&e.search("dog -quikc~", 10).unwrap()), [6]);
+    assert_eq!(sorted_ids(&e.search("(posting~ OR frmae~) AND compresed~", 10).unwrap()), [3]);
+}
+
+#[test]
+fn fuzzy_survives_merge() {
+    let (_d, e) = loaded(small_cfg());
+    let before = e.search("lazzy~ brwn~", 10).unwrap();
+    assert!(!before.is_empty());
+    e.force_merge().unwrap();
+    assert_eq!(before, e.search("lazzy~ brwn~", 10).unwrap());
+}

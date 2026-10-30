@@ -10,12 +10,15 @@
 //! (rust OR go) -java   groups nest, and take +/- like any other clause
 //! rust AND search      AND makes both sides required, OR leaves them optional
 //! rust NOT java        same as -java
+//! serch~               fuzzy: indexed terms within 1-2 edits (by word length), same first letter
+//! serch~1              fuzzy with an explicit distance, 0 to 2
 //! ```
 //!
 //! AND / OR / NOT only count in capitals, lowercase `and` is a stopword like
 //! always. Text is run through the same analyzer as documents, so `Indexing`
 //! finds `indexed`, and stopwords inside a phrase leave the right gap.
 
+use super::fuzzy;
 use crate::analysis::Analyzer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +35,8 @@ pub enum Clause {
     Prefix(String),
     // (term, offset from the first term of the phrase)
     Phrase(Vec<(String, u32)>),
+    // analysed term, max edits
+    Fuzzy(String, u32),
     Group(Query),
 }
 
@@ -78,6 +83,16 @@ impl Query {
 
 // deeper than this and the rest is read as plain text, so "((((((..." can't blow the stack
 const MAX_DEPTH: usize = 16;
+
+// "word~" or "word~2"; the number is clamped to what fuzzy matching supports
+fn split_fuzzy(text: &str) -> Option<(&str, Option<u32>)> {
+    let (word, tail) = text.rsplit_once('~')?;
+    if word.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let dist = tail.parse::<u32>().ok().map(|d| d.min(fuzzy::MAX_DIST));
+    Some((word, dist))
+}
 
 fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Query {
     let mut clauses: Vec<QueryClause> = Vec::new();
@@ -161,8 +176,12 @@ fn parse_level(chars: &[char], i: &mut usize, an: &Analyzer, depth: usize) -> Qu
                 }
             }
 
-            let prefix = text.strip_suffix('*').and_then(|stem| an.fold_prefix(stem));
-            if let Some(p) = prefix {
+            if let Some((word, dist)) = split_fuzzy(&text) {
+                for t in an.analyze(word) {
+                    let d = dist.unwrap_or_else(|| fuzzy::auto_dist(&t.term));
+                    clauses.push(QueryClause { occur, clause: Clause::Fuzzy(t.term, d) });
+                }
+            } else if let Some(p) = text.strip_suffix('*').and_then(|stem| an.fold_prefix(stem)) {
                 clauses.push(QueryClause { occur, clause: Clause::Prefix(p) });
             } else {
                 // "wi-fi" analyses to two terms; each gets the same occur
@@ -291,6 +310,20 @@ mod tests {
         assert!(parse("()").clauses.is_empty());
         assert_eq!(parse("(fox").clauses.len(), 1);
         assert_eq!(parse("fox)").clauses, [term(Occur::Should, "fox")]);
+    }
+
+    #[test]
+    fn fuzzy_suffix() {
+        let f = |t: &str, d: u32| QueryClause { occur: Occur::Should, clause: Clause::Fuzzy(t.into(), d) };
+        assert_eq!(parse("quikc~").clauses, [f("quikc", 1)]);
+        assert_eq!(parse("quikcer~").clauses, [f("quikcer", 2)]);
+        assert_eq!(parse("quick~0").clauses, [f("quick", 0)]);
+        // clamped, and a stem is what gets compared
+        assert_eq!(parse("running~9").clauses, [f("run", 2)]);
+        assert_eq!(parse("fox~ ").clauses, [f("fox", 1)]);
+        // not fuzzy: no word, or junk after the tilde
+        assert!(parse("~").clauses.is_empty());
+        assert_eq!(parse("fox~bar").clauses.len(), 2);
     }
 
     #[test]
