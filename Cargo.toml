@@ -5,6 +5,11 @@ edition = "2021"
 rust-version = "1.89"
 description = "Segment-based full-text search storage engine: inverted index, FoR/VByte compression, BM25"
 license = "MIT"
+repository = "https://github.com/monaaoua9/hiis"
+readme = "README.md"
+keywords = ["search", "full-text", "bm25", "inverted-index", "arabic"]
+categories = ["database-implementations", "text-processing"]
+include = ["src/**", "examples/**", "Cargo.toml", "README.md", "LICENSE", "CHANGELOG.md", "docs/**", "tests/**", "data/**"]
 
 [lib]
 name = "hiis"
