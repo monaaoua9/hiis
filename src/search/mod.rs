@@ -76,6 +76,19 @@ pub fn execute_with(
     execute_after(segments, q, k, bm25, prune, None)
 }
 
+/// How many live documents match, no ranking and no top-k. Costs a full evaluation of the query.
+pub fn count(segments: &[Arc<Segment>], q: &Query, bm25: Bm25) -> Result<u64> {
+    if q.clauses.is_empty() {
+        return Ok(0);
+    }
+    let Some(ctx) = build_ctx(segments, q, bm25) else { return Ok(0) };
+    let mut n = 0;
+    for seg in segments {
+        n += eval_segment(seg, q, &ctx)?.len() as u64;
+    }
+    Ok(n)
+}
+
 /// The next `k` hits below `after` in ranking order (score descending, then doc id ascending).
 pub fn execute_after(
     segments: &[Arc<Segment>],

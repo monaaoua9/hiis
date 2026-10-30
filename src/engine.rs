@@ -286,6 +286,15 @@ impl Engine {
         search::execute(&snapshot, q, k, params)
     }
 
+    /// Number of documents matching the query, scoring aside. Walks every match, so on a
+    /// common term it is as slow as an exhaustive search.
+    pub fn count(&self, query: &str) -> Result<u64> {
+        let q = Query::parse(query, &self.shared.analyzer);
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        let params = Bm25 { k1: self.shared.cfg.bm25_k1, b: self.shared.cfg.bm25_b };
+        search::count(&snapshot, &q, params)
+    }
+
     /// One page of up to `k` hits, starting right after `after` (None = first page).
     /// See [`Cursor`] for what stays stable between requests.
     pub fn search_page(&self, query: &str, k: usize, after: Option<Cursor>) -> Result<Page> {

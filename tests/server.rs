@@ -136,6 +136,10 @@ fn pagination_walks_every_hit_once() {
     }
     seen.sort_unstable();
     assert_eq!(seen, (0..25).collect::<Vec<u64>>());
+
+    let r = call(&srv, "GET", "/api/v1/search?q=shared&limit=3&count=1", "");
+    assert_eq!(data(&r).as_array().unwrap().len(), 3);
+    assert_eq!(num(r.json.get("meta").unwrap().get("total").unwrap()), 25.0);
 }
 
 #[test]

@@ -199,3 +199,26 @@ fn highlight_through_the_engine() {
     assert!(e.highlight(0, "fox", &opts).is_none());
     assert!(e.highlight(999, "fox", &opts).is_none());
 }
+
+#[test]
+fn count_matches_search_without_a_limit() {
+    let (_d, e) = loaded(small_cfg());
+    for q in [
+        "dog",
+        "quick OR lazy",
+        "+brown -lazy",
+        "\"posting lists\"",
+        "quikc~",
+        "comp*",
+        "(fox OR cat) AND dog",
+        "zzz",
+        "",
+    ] {
+        let all = e.search(q, 1000).unwrap().len() as u64;
+        assert_eq!(e.count(q).unwrap(), all, "{q}");
+    }
+    e.delete(0).unwrap();
+    assert_eq!(e.count("fox").unwrap(), 1);
+    e.force_merge().unwrap();
+    assert_eq!(e.count("fox").unwrap(), 1);
+}

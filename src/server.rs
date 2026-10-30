@@ -6,7 +6,7 @@
 //! DELETE /api/v1/documents/{id}
 //! GET    /api/v1/documents/{id}/similar?limit=5
 //! GET    /api/v1/documents/{id}/explain?q=...
-//! GET    /api/v1/search?q=...&limit=10&cursor=...&highlight=1
+//! GET    /api/v1/search?q=...&limit=10&cursor=...&highlight=1&count=1
 //! GET    /api/v1/suggest?prefix=...&limit=10
 //! POST   /api/v1/commit
 //! GET    /api/v1/stats
@@ -523,6 +523,9 @@ fn search(st: &State, req: &Request) -> Reply {
         ("took_ms", Json::Num(took.as_secs_f64() * 1000.0)),
         ("next_cursor", page.next.map(|c| c.to_string()).into()),
     ];
+    if matches!(req.param("count"), Some("1" | "true")) {
+        meta.push(("total", st.engine.count(q).map_err(internal)?.into()));
+    }
     if page.hits.is_empty() && after.is_none() {
         meta.push(("did_you_mean", st.engine.did_you_mean(q).into()));
     }
