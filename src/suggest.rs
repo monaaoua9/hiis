@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::analysis::Analyzer;
+use crate::analysis::{arabic, Analyzer};
 use crate::index::segment::Segment;
 use crate::search::fuzzy;
 
@@ -25,12 +25,12 @@ fn doc_freq(segs: &[Arc<Segment>], term: &str) -> u64 {
     segs.iter().filter_map(|s| s.term(term)).map(|e| e.doc_freq as u64).sum()
 }
 
-// a word from a live document that analyses to `stem` and passes `accept`
+// a word from a live document that analyses to `stem`; `accept` can veto it or reshape it
 fn surface(
     segs: &[Arc<Segment>],
     an: &Analyzer,
     stem: &str,
-    accept: impl Fn(&str) -> bool,
+    accept: impl Fn(String) -> Option<String>,
 ) -> Option<String> {
     let mut looked = 0;
     for seg in segs {
@@ -43,9 +43,8 @@ fn surface(
             if let Some(text) = seg.text(local) {
                 for t in an.analyze(&text) {
                     if t.term == stem {
-                        let word = text[t.start..t.end].to_lowercase();
-                        if accept(&word) {
-                            return Some(word);
+                        if let Some(w) = accept(text[t.start..t.end].to_lowercase()) {
+                            return Some(w);
                         }
                     }
                 }
@@ -89,7 +88,14 @@ pub fn complete(segs: &[Arc<Segment>], an: &Analyzer, prefix: &str, limit: usize
 
     let mut out: Vec<Suggestion> = Vec::new();
     for (stem, df) in ranked.into_iter().take(limit * 3) {
-        let Some(word) = surface(segs, an, &stem, |w| w.starts_with(&p)) else { continue };
+        // typing "مدر" should offer the word without its article, "مدرسة", not skip it
+        let wanted = |w: String| {
+            if w.starts_with(&p) {
+                return Some(w);
+            }
+            arabic::strip_article(&w).filter(|r| r.starts_with(&p)).map(str::to_string)
+        };
+        let Some(word) = surface(segs, an, &stem, wanted) else { continue };
         if out.iter().all(|s| s.text != word) {
             out.push(Suggestion { text: word, doc_freq: df });
         }
@@ -112,7 +118,7 @@ pub fn correct_word(segs: &[Arc<Segment>], an: &Analyzer, word: &str) -> Option<
         if c.dist == 0 {
             continue;
         }
-        if let Some(w) = surface(segs, an, &c.term, |_| true) {
+        if let Some(w) = surface(segs, an, &c.term, Some) {
             return Some(Suggestion { text: w, doc_freq: c.doc_freq });
         }
     }

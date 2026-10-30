@@ -7,6 +7,7 @@
 //! keeps `quick` and `fox` two apart. That is what makes phrase queries with
 //! stopwords inside them match the same way at index and query time.
 
+pub(crate) mod arabic;
 mod stemmer;
 mod stopwords;
 mod tokenizer;
@@ -23,13 +24,15 @@ pub struct Token {
 pub struct AnalyzerConfig {
     pub remove_stopwords: bool,
     pub stem: bool,
+    // light stemming for Arabic words (needs `stem` too); English rules leave them alone anyway
+    pub arabic_stem: bool,
     // longer than this is almost always base64 / hashes / garbage, not a word
     pub max_token_chars: usize,
 }
 
 impl Default for AnalyzerConfig {
     fn default() -> Self {
-        AnalyzerConfig { remove_stopwords: true, stem: true, max_token_chars: 64 }
+        AnalyzerConfig { remove_stopwords: true, stem: true, arabic_stem: true, max_token_chars: 64 }
     }
 }
 
@@ -76,7 +79,12 @@ impl Analyzer {
         if self.cfg.remove_stopwords && stopwords::is_stopword(&folded) {
             return None;
         }
-        Some(if self.cfg.stem { stemmer::stem(folded) } else { folded })
+        Some(match (self.cfg.stem, arabic::is_arabic(&folded)) {
+            (false, _) => folded,
+            (true, false) => stemmer::stem(folded),
+            (true, true) if self.cfg.arabic_stem => arabic::stem(&folded),
+            (true, true) => folded,
+        })
     }
 }
 
@@ -123,6 +131,28 @@ mod tests {
     fn arabic_folding() {
         assert_eq!(terms("أحمد"), terms("احمد"));
         assert_eq!(terms("مَدْرَسَة"), terms("مدرسه"));
+    }
+
+    #[test]
+    fn arabic_forms_collapse() {
+        assert_eq!(terms("المدرسة"), terms("مدرسه"));
+        assert_eq!(terms("المعلمون"), terms("معلمين"));
+        assert_eq!(terms("المدرسة"), ["مدرس"]);
+        // the Latin side is untouched
+        assert_eq!(terms("Running مدرسة"), ["run", "مدرس"]);
+    }
+
+    #[test]
+    fn arabic_stopwords_leave_a_gap() {
+        let toks = Analyzer::default().analyze("كتاب في المكتبة");
+        assert_eq!(toks.iter().map(|t| t.position).collect::<Vec<_>>(), [0, 2]);
+    }
+
+    #[test]
+    fn arabic_stemming_can_be_switched_off() {
+        let a = Analyzer::new(AnalyzerConfig { arabic_stem: false, ..Default::default() });
+        let t: Vec<_> = a.analyze("المدرسة").into_iter().map(|t| t.term).collect();
+        assert_eq!(t, ["المدرسه"]);
     }
 
     #[test]
