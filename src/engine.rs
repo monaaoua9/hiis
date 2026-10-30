@@ -28,6 +28,7 @@ use crate::index::segment::{bit_set, del_path, seg_path, write_atomic, Segment};
 use crate::index::DocId;
 use crate::search::bm25::Bm25;
 use crate::search::explain::Explanation;
+use crate::search::page::{Cursor, Page};
 use crate::search::query::Query;
 use crate::search::{self, Hit};
 use crate::suggest::{self, Suggestion};
@@ -282,6 +283,17 @@ impl Engine {
         let snapshot = self.shared.segments.read().unwrap().clone();
         let params = Bm25 { k1: self.shared.cfg.bm25_k1, b: self.shared.cfg.bm25_b };
         search::execute(&snapshot, q, k, params)
+    }
+
+    /// One page of up to `k` hits, starting right after `after` (None = first page).
+    /// See [`Cursor`] for what stays stable between requests.
+    pub fn search_page(&self, query: &str, k: usize, after: Option<Cursor>) -> Result<Page> {
+        let q = Query::parse(query, &self.shared.analyzer);
+        let snapshot = self.shared.segments.read().unwrap().clone();
+        let params = Bm25 { k1: self.shared.cfg.bm25_k1, b: self.shared.cfg.bm25_b };
+        let hits = search::execute_after(&snapshot, &q, k, params, true, after.map(|c| c.as_hit()))?;
+        let next = if k > 0 && hits.len() == k { hits.last().map(Cursor::after) } else { None };
+        Ok(Page { hits, next })
     }
 
     /// Same as `search` but with pruning off. Results must match exactly; kept public for tests and benchmarks.

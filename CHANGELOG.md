@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* `Engine::search_page` with a text `Cursor`: next-k-after-this-hit pagination instead of offsets; pruning still applies. Pages concatenate to exactly the full ranking.
 * `Engine::verify(deep)` / `hiis verify`: walks every posting list (order, counts, positions, per-document token totals) and, with `--deep`, re-analyses all stored text. Catches damage that still passes the segment checksum.
 * `Engine::backup(dest)` / `hiis backup`: consistent copy of the committed index while searches and writes continue; merges wait for the copy. The result opens as an independent index.
 * `Engine::explain` / `hiis explain`: per-clause score breakdown for one document (idf, tf, lengths for terms), also for documents that did not make it, which shows what excluded them. The total equals the score `search` reports.

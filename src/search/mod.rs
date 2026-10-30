@@ -11,6 +11,7 @@
 pub mod bm25;
 pub mod explain;
 pub mod fuzzy;
+pub mod page;
 pub mod query;
 
 use std::cmp::{Ordering, Reverse};
@@ -53,6 +54,8 @@ struct Ctx {
     expand: HashMap<String, Vec<String>>,
     // (term, edits) -> variants with a weight that drops as they get further from the typed word
     fuzzy: HashMap<(String, u32), Vec<(String, f32)>>,
+    // pagination: hits that rank at or above this one were already served
+    after: Option<Hit>,
 }
 
 type Scored = Vec<(u32, f32)>;
@@ -70,11 +73,24 @@ pub fn execute_with(
     bm25: Bm25,
     prune: bool,
 ) -> Result<Vec<Hit>> {
+    execute_after(segments, q, k, bm25, prune, None)
+}
+
+/// The next `k` hits below `after` in ranking order (score descending, then doc id ascending).
+pub fn execute_after(
+    segments: &[Arc<Segment>],
+    q: &Query,
+    k: usize,
+    bm25: Bm25,
+    prune: bool,
+    after: Option<Hit>,
+) -> Result<Vec<Hit>> {
     if k == 0 || q.clauses.is_empty() {
         return Ok(Vec::new());
     }
 
-    let Some(ctx) = build_ctx(segments, q, bm25) else { return Ok(Vec::new()) };
+    let Some(mut ctx) = build_ctx(segments, q, bm25) else { return Ok(Vec::new()) };
+    ctx.after = after;
 
     let mut heap: BinaryHeap<Reverse<Hit>> = BinaryHeap::with_capacity(k + 1);
     let disjunction = if prune { pure_disjunction(q) } else { None };
@@ -85,7 +101,7 @@ pub fn execute_with(
             continue;
         }
         for (doc, score) in eval_segment(seg, q, &ctx)? {
-            offer(&mut heap, k, Hit { doc_id: seg.doc(doc).ext_id, score });
+            offer(&mut heap, k, ctx.after, Hit { doc_id: seg.doc(doc).ext_id, score });
         }
     }
     Ok(heap.into_sorted_vec().into_iter().map(|r| r.0).collect())
@@ -126,7 +142,7 @@ fn build_ctx(segments: &[Arc<Segment>], q: &Query, bm25: Bm25) -> Option<Ctx> {
         let df: u64 = segments.iter().filter_map(|s| s.term(t)).map(|e| e.doc_freq as u64).sum();
         idf.insert(t.to_string(), Bm25::idf(n_docs, df));
     }
-    Some(Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand, fuzzy: fuzzy_map })
+    Some(Ctx { bm25, avg_len: total_len as f32 / n_docs as f32, idf, expand, fuzzy: fuzzy_map, after: None })
 }
 
 // a prefix like "a*" would otherwise drag in half the dictionary; first terms in
@@ -165,7 +181,10 @@ fn expand_fuzzy(segments: &[Arc<Segment>], term: &str, dist: u32) -> Vec<(String
         .collect()
 }
 
-fn offer(heap: &mut BinaryHeap<Reverse<Hit>>, k: usize, hit: Hit) {
+fn offer(heap: &mut BinaryHeap<Reverse<Hit>>, k: usize, after: Option<Hit>, hit: Hit) {
+    if after.is_some_and(|a| hit >= a) {
+        return;
+    }
     if heap.len() < k {
         heap.push(Reverse(hit));
     } else if hit > heap.peek().unwrap().0 {
@@ -240,7 +259,7 @@ fn wand_segment(
             if !bit_set(&dels, d) {
                 let dl = seg.doc(d).len as f32;
                 let score = ctx.bm25.score(lane.idf, lane.cur.freq() as f32, dl, ctx.avg_len) * lane.boost;
-                offer(heap, k, Hit { doc_id: seg.doc(d).ext_id, score });
+                offer(heap, k, ctx.after, Hit { doc_id: seg.doc(d).ext_id, score });
             }
             cur_doc = lane.cur.next()?;
         }
@@ -305,7 +324,7 @@ fn wand_segment(
                     for p in &parts[1..] {
                         score += p.1;
                     }
-                    offer(heap, k, Hit { doc_id: seg.doc(d).ext_id, score });
+                    offer(heap, k, ctx.after, Hit { doc_id: seg.doc(d).ext_id, score });
                 }
             }
         }

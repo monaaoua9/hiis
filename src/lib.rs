@@ -33,6 +33,7 @@ pub use error::{Error, Result};
 pub use highlight::{HighlightOpts, Snippet};
 pub use index::DocId;
 pub use search::explain::{ClauseExplain, Explanation};
+pub use search::page::{Cursor, Page};
 pub use search::Hit;
 pub use suggest::Suggestion;
 pub use verify::VerifyReport;
