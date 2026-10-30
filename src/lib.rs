@@ -21,11 +21,13 @@ pub mod analysis;
 pub mod codec;
 pub mod engine;
 pub mod error;
+pub mod highlight;
 pub mod index;
 pub mod search;
 mod wal;
 
 pub use engine::{Config, Engine, Stats};
 pub use error::{Error, Result};
+pub use highlight::{HighlightOpts, Snippet};
 pub use index::DocId;
 pub use search::Hit;

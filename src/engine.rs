@@ -21,6 +21,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::analysis::{Analyzer, AnalyzerConfig};
 use crate::error::{Error, Result};
+use crate::highlight::{self, HighlightOpts, Snippet};
 use crate::index::builder::SegmentBuilder;
 use crate::index::merge::{merge_segments, MergePolicy};
 use crate::index::segment::{bit_set, del_path, seg_path, write_atomic, Segment};
@@ -292,6 +293,14 @@ impl Engine {
     pub fn get(&self, id: DocId) -> Option<String> {
         let segs = self.shared.segments.read().unwrap();
         segs.iter().find_map(|s| s.text_of(id))
+    }
+
+    /// The best `opts.max_chars` of the document for this query, matches marked. None if the
+    /// document is gone.
+    pub fn highlight(&self, id: DocId, query: &str, opts: &HighlightOpts) -> Option<Snippet> {
+        let text = self.get(id)?;
+        let q = Query::parse(query, &self.shared.analyzer);
+        Some(highlight::highlight(&self.shared.analyzer, &text, &q, opts))
     }
 
     /// Merge everything into one segment, dropping deleted docs.

@@ -2,7 +2,7 @@ use std::fs;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use hiis::{Config, Engine, Result};
+use hiis::{Config, Engine, HighlightOpts, Result};
 
 const USAGE: &str = "\
 usage:
@@ -55,10 +55,16 @@ fn run(args: &[String]) -> Result<()> {
             let t = Instant::now();
             let hits = engine.search(query, k)?;
             let us = t.elapsed().as_micros();
+            // matched words in bold (ansi)
+            let opts = HighlightOpts {
+                pre: "\x1b[1m".into(),
+                post: "\x1b[0m".into(),
+                max_chars: 110,
+                escape_html: false,
+            };
             for (rank, h) in hits.iter().enumerate() {
-                let text = engine.get(h.doc_id).unwrap_or_default();
-                let snippet: String = text.chars().take(90).collect();
-                println!("{:>2}. {:>7.3}  #{:<6} {}", rank + 1, h.score, h.doc_id, snippet);
+                let snip = engine.highlight(h.doc_id, query, &opts).map(|s| s.text).unwrap_or_default();
+                println!("{:>2}. {:>7.3}  #{:<6} {}", rank + 1, h.score, h.doc_id, snip.replace('\n', " "));
             }
             println!("-- {} hits in {us}us", hits.len());
         }

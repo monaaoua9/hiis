@@ -186,3 +186,16 @@ fn group_boost_scales_everything_inside() {
     assert_eq!(one.doc_id, tripled.doc_id);
     assert!((tripled.score - one.score * 3.0).abs() < 1e-4);
 }
+
+#[test]
+fn highlight_through_the_engine() {
+    let (_d, e) = loaded(small_cfg());
+    let opts = hiis::HighlightOpts::default();
+    let s = e.highlight(0, "quikc~ \"brown fox\"", &opts).unwrap();
+    assert_eq!(s.text, "The <em>quick brown fox</em> jumps over the lazy dog");
+    assert_eq!(s.matches, 3);
+
+    e.delete(0).unwrap();
+    assert!(e.highlight(0, "fox", &opts).is_none());
+    assert!(e.highlight(999, "fox", &opts).is_none());
+}
