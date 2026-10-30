@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+* Arabic stemmer: `-يات` feminine plurals and a bare alef tanween (قروضا) now meet their base form. Terms change, so run `hiis reindex` on existing Arabic content.
+* `data/arabic-eval` (60 docs, 34 queries) and `eval --no-arabic-stem` / `--verbose` to measure Arabic retrieval; nDCG@10 0.60 without stemming, 0.97 with (small, self-written set, see README).
+
 ## 0.2.1 - 2026-10-30
 
 * Server: fixed idle keep-alive connections starving new ones (a fixed worker pool let a few idle clients block everyone for the idle timeout). Each connection now has its own thread, capped by `ServerConfig::max_connections` (default 256, then 503 `OVERLOADED`); `--threads` became `--max-conns`. Idle connections notice shutdown within 200 ms.

@@ -8,7 +8,7 @@
 
 // longest first, the first one that fits wins
 const PREFIXES: &[&str] = &["وال", "بال", "كال", "فال", "ولل", "لل", "ال"];
-const SUFFIXES: &[&str] = &["ها", "ان", "ات", "ون", "ين", "يه", "ي", "ه"];
+const SUFFIXES: &[&str] = &["ها", "يات", "ان", "ات", "ون", "ين", "يه", "ي", "ه"];
 
 const MIN_STEM: usize = 3;
 
@@ -49,12 +49,18 @@ pub fn stem(word: &str) -> String {
         chars.remove(0);
     }
 
+    let mut suffixed = false;
     for s in SUFFIXES {
         let n = s.chars().count();
         if chars.len() >= n + MIN_STEM && chars.iter().skip(chars.len() - n).copied().eq(s.chars()) {
             chars.truncate(chars.len() - n);
+            suffixed = true;
             break;
         }
+    }
+    // accusative tanween written as a bare alef (قروضا), only when a 4-letter stem is left
+    if !suffixed && chars.len() >= 5 && chars.last() == Some(&'ا') {
+        chars.pop();
     }
     chars.into_iter().collect()
 }
@@ -76,6 +82,15 @@ mod tests {
         for w in ["معلمون", "معلمين", "معلمات", "المعلمون", "والمعلمين"] {
             assert_eq!(stem(w), "معلم", "{w}");
         }
+    }
+
+    #[test]
+    fn feminine_plural_and_tanween_alef() {
+        assert_eq!(stem("بطاريات"), stem("بطاريه"));
+        assert_eq!(stem("قروضا"), stem("القروض"));
+        // short words ending in alef stay whole
+        assert_eq!(stem("دنيا"), "دنيا");
+        assert_eq!(stem("هذا"), "هذا");
     }
 
     #[test]

@@ -156,6 +156,17 @@ flat BM25 baseline is about 0.679 on the same split.
 cargo run --release --example eval -- path/to/scifact
 ```
 
+### Arabic
+
+`data/arabic-eval/` is a small BEIR-layout set I wrote by hand: 60 short documents on 12 topics, 34 queries phrased with other word forms than the documents (plural vs singular, with or without the article, no hamza). Run it with `cargo run --release --example eval -- data/arabic-eval [--no-arabic-stem] [--verbose]`.
+
+```
+no Arabic stemming   nDCG@10 0.5977   MRR@10 0.6127   Recall@100 0.5784
+light stemmer        nDCG@10 0.9671   MRR@10 0.9804   Recall@100 0.9608
+```
+
+Read this with care. It is tiny, I wrote both the documents and the queries, and the last stemmer fixes (feminine plural `-يات`, bare alef tanween) were made after looking at which queries failed, so 0.97 is optimistic. What it does show is that the stemmer helps a lot on morphology. What still fails: broken plurals (سياح/سائح, مصارف/مصرف) and a single-letter prefix like `ب`, which a light stemmer can't handle.
+
 ## Against Tantivy
 
 `bench-compare/` is a separate crate (the main one stays dependency-free) that

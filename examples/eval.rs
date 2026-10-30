@@ -1,4 +1,4 @@
-//! cargo run --release --example eval -- path/to/beir-dataset
+//! cargo run --release --example eval -- path/to/beir-dataset [--no-arabic-stem] [--verbose]
 //!
 //! Ranking quality on a BEIR-layout collection (corpus.jsonl, queries.jsonl,
 //! qrels/test.tsv), e.g. SciFact. Prints nDCG@10, MRR@10, Recall@100 and
@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
+use hiis::analysis::AnalyzerConfig;
 use hiis::{Config, Engine};
 
 // pulls `"key": "..."` out of one JSON line; enough for BEIR files
@@ -47,7 +48,10 @@ fn main() -> hiis::Result<()> {
 
     let dir = std::env::temp_dir().join(format!("hiis-eval-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    let engine = Engine::open(&dir, Config::default())?;
+    let arabic_stem = !std::env::args().any(|a| a == "--no-arabic-stem");
+    let verbose = std::env::args().any(|a| a == "--verbose");
+    let cfg = Config { analyzer: AnalyzerConfig { arabic_stem, ..Default::default() }, ..Config::default() };
+    let engine = Engine::open(&dir, cfg)?;
 
     let mut names: Vec<String> = Vec::new();
     let mut batch: Vec<String> = Vec::new();
@@ -97,7 +101,11 @@ fn main() -> hiis::Result<()> {
         ideal.sort_unstable_by(|a, b| b.cmp(a));
         let best = dcg(ideal.iter().copied().take(10));
         if best > 0.0 {
-            ndcg += dcg(got.iter().copied().take(10)) / best;
+            let q = dcg(got.iter().copied().take(10)) / best;
+            ndcg += q;
+            if verbose && q < 0.999 {
+                println!("  {q:.2}  {text}");
+            }
         }
         mrr += got.iter().take(10).position(|&r| r > 0).map_or(0.0, |i| 1.0 / (i as f64 + 1.0));
         let found = got.iter().filter(|&&r| r > 0).count();
