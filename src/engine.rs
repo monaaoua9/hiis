@@ -56,6 +56,10 @@ pub struct Config {
     /// segment files up to this size are held in memory; bigger ones are read
     /// from disk per query, so index size is not capped by RAM
     pub resident_limit: u64,
+    /// open an existing index for searching only: shared lock (any number of read-only engines
+    /// can share a directory, none while a writer has it), nothing on disk is touched, the
+    /// write-ahead log is ignored and every write method returns an error
+    pub read_only: bool,
 }
 
 impl Default for Config {
@@ -70,6 +74,7 @@ impl Default for Config {
             background_merge: true,
             wal_fsync: false,
             resident_limit: 512 << 20,
+            read_only: false,
         }
     }
 }
@@ -97,7 +102,8 @@ struct Shared {
     analyzer: Analyzer,
     buffer: Mutex<SegmentBuilder>,
     // lock order: buffer, then wal
-    wal: Mutex<Wal>,
+    // None when read-only
+    wal: Option<Mutex<Wal>>,
     flushed_upto: AtomicU64,
     segments: RwLock<Vec<Arc<Segment>>>,
     next_doc: AtomicU64,
@@ -118,16 +124,24 @@ pub struct Engine {
 impl Engine {
     pub fn open(dir: impl AsRef<Path>, cfg: Config) -> Result<Engine> {
         let dir = dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir)?;
+        let ro = cfg.read_only;
+        if !ro {
+            fs::create_dir_all(&dir)?;
+        }
 
         // held for the life of the engine; the OS drops it if we crash
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.join("LOCK"))?;
-        lock.try_lock().map_err(|e| match e {
+        let lock = if ro {
+            fs::OpenOptions::new().read(true).open(dir.join("LOCK"))?
+        } else {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dir.join("LOCK"))?
+        };
+        let locked = if ro { lock.try_lock_shared() } else { lock.try_lock() };
+        locked.map_err(|e| match e {
             fs::TryLockError::WouldBlock => Error::Locked,
             fs::TryLockError::Error(e) => Error::Io(e),
         })?;
@@ -158,13 +172,20 @@ impl Engine {
         for &id in &ids {
             segments.push(Arc::new(Segment::open_with(&dir, id, cfg.resident_limit)?));
         }
-        remove_orphans(&dir, &ids);
+        if !ro {
+            remove_orphans(&dir, &ids);
+        }
 
         // docs in the log with id < flushed_upto already made it into a segment
         // (crash between manifest write and log reset)
         let flushed_upto = flushed_upto.unwrap_or(next_doc);
         let analyzer = Analyzer::new(cfg.analyzer.clone());
-        let (wal, replayed) = Wal::open(&dir.join(WAL), cfg.wal_fsync)?;
+        let (wal, replayed) = if ro {
+            (None, Vec::new())
+        } else {
+            let (w, r) = Wal::open(&dir.join(WAL), cfg.wal_fsync)?;
+            (Some(Mutex::new(w)), r)
+        };
         let mut builder = SegmentBuilder::default();
         for (id, text) in replayed.into_iter().filter(|r| r.0 >= flushed_upto) {
             builder.add(id, &text, SegmentBuilder::group(analyzer.analyze(&text)));
@@ -176,7 +197,7 @@ impl Engine {
             analyzer,
             dir,
             cfg,
-            wal: Mutex::new(wal),
+            wal,
             flushed_upto: AtomicU64::new(flushed_upto),
             buffer: Mutex::new(builder),
             segments: RwLock::new(segments),
@@ -189,25 +210,28 @@ impl Engine {
             last_merge_err: Mutex::new(None),
         });
 
-        let merger = if shared.cfg.background_merge {
+        let merger = if shared.cfg.background_merge && !ro {
             let s = Arc::clone(&shared);
             Some(thread::Builder::new().name("hiis-merger".into()).spawn(move || merger_loop(s))?)
         } else {
             None
         };
         // a previous run may have stopped with a merge pending
-        shared.wake_merger();
+        if !ro {
+            shared.wake_merger();
+        }
         Ok(Engine { shared, merger })
     }
 
     pub fn add_document(&self, text: &str) -> Result<DocId> {
+        self.writable()?;
         let grouped = SegmentBuilder::group(self.shared.analyzer.analyze(text));
 
         let mut buf = self.shared.buffer.lock().unwrap();
         // id is taken under the buffer lock: flush relies on "every id below
         // next_doc is already in this buffer or in a segment"
         let id = self.shared.next_doc.fetch_add(1, Ordering::Relaxed);
-        self.shared.wal.lock().unwrap().append(id, text)?;
+        self.shared.wal.as_ref().unwrap().lock().unwrap().append(id, text)?;
         buf.add(id, text, grouped);
         let c = &self.shared.cfg;
         if buf.len() >= c.flush_docs || buf.ram_bytes() >= c.flush_bytes {
@@ -219,6 +243,7 @@ impl Engine {
     /// Same as calling `add_document` for each text, but the WAL gets one
     /// write (and one fsync with `wal_fsync`) for the lot.
     pub fn add_documents<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Result<Vec<DocId>> {
+        self.writable()?;
         let an = &self.shared.analyzer;
         let one = |t: &S| SegmentBuilder::group(an.analyze(t.as_ref()));
         let lanes = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
@@ -240,7 +265,7 @@ impl Engine {
         let first = self.shared.next_doc.fetch_add(texts.len() as u64, Ordering::Relaxed);
         let ids: Vec<DocId> = (first..first + texts.len() as u64).collect();
         let batch: Vec<(DocId, &str)> = ids.iter().copied().zip(texts.iter().map(|t| t.as_ref())).collect();
-        self.shared.wal.lock().unwrap().append_batch(&batch)?;
+        self.shared.wal.as_ref().unwrap().lock().unwrap().append_batch(&batch)?;
         for ((id, text), g) in batch.into_iter().zip(grouped) {
             buf.add(id, text, g);
         }
@@ -249,6 +274,13 @@ impl Engine {
             self.shared.flush(&mut buf)?;
         }
         Ok(ids)
+    }
+
+    fn writable(&self) -> Result<()> {
+        if self.shared.cfg.read_only {
+            return Err(Error::Invalid("index is open read-only".into()));
+        }
+        Ok(())
     }
 
     /// Flush the buffer and persist pending deletes.
@@ -265,6 +297,7 @@ impl Engine {
     }
 
     pub fn delete(&self, id: DocId) -> Result<bool> {
+        self.writable()?;
         {
             let mut buf = self.shared.buffer.lock().unwrap();
             if buf.contains(id) {
@@ -450,6 +483,7 @@ impl Engine {
 
     /// Merge everything into one segment, dropping deleted docs.
     pub fn force_merge(&self) -> Result<()> {
+        self.writable()?;
         self.commit()?;
         let _g = self.shared.merge_mu.lock().unwrap();
         let (src, snaps) = {
@@ -484,6 +518,9 @@ impl Engine {
 
     /// Block until the background merger has nothing left to do (mostly for tests/benchmarks).
     pub fn wait_for_merges(&self) {
+        if self.shared.cfg.read_only {
+            return;
+        }
         loop {
             let armed = self.shared.ctl.lock().unwrap().wake;
             if !armed {
@@ -528,7 +565,9 @@ impl Shared {
         self.segments.write().unwrap().push(seg);
         self.flushed_upto.store(self.next_doc.load(Ordering::Relaxed), Ordering::Relaxed);
         self.write_manifest()?;
-        self.wal.lock().unwrap().reset()?;
+        if let Some(w) = &self.wal {
+            w.lock().unwrap().reset()?;
+        }
         self.wake_merger();
         Ok(())
     }
