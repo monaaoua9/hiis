@@ -31,5 +31,6 @@ pub use engine::{Config, Engine, Stats};
 pub use error::{Error, Result};
 pub use highlight::{HighlightOpts, Snippet};
 pub use index::DocId;
+pub use search::explain::{ClauseExplain, Explanation};
 pub use search::Hit;
 pub use suggest::Suggestion;

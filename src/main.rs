@@ -8,6 +8,7 @@ const USAGE: &str = "\
 usage:
   hiis index  <dir> <file>        one document per non-empty line
   hiis search <dir> <query> [-k N]
+  hiis explain <dir> <query> <doc-id>
   hiis complete <dir> <prefix> [-k N]
   hiis get    <dir> <doc-id>
   hiis delete <dir> <doc-id>
@@ -72,6 +73,13 @@ fn run(args: &[String]) -> Result<()> {
                 if let Some(q) = engine.did_you_mean(query) {
                     println!("did you mean: {q}");
                 }
+            }
+        }
+        ("explain", [query, id]) => {
+            let id = id.parse().map_err(|_| bad_usage())?;
+            match engine.explain(query, id)? {
+                Some(x) => print!("{x}"),
+                None => println!("no such document"),
             }
         }
         ("complete", [prefix, opts @ ..]) => {

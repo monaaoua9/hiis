@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* `Engine::explain` / `hiis explain`: per-clause score breakdown for one document (idf, tf, lengths for terms), also for documents that did not make it, which shows what excluded them. The total equals the score `search` reports.
 * `Engine::complete` (autocomplete) and `Engine::did_you_mean`: both answered from the term dictionary, and mapped from stems back to words that occur in live documents. CLI: `complete`, and a suggestion when a search finds nothing.
 * `Engine::highlight`: snippet of the densest `max_chars` window with the query's words marked (stemmed, prefix and fuzzy matches included, negated terms not). HTML-escaped by default. The CLI `search` prints snippets with the hits in bold.
 * Clause boosts: `title^2`, `"a b"^1.5`, `(x y)^3`. `^0` turns a clause into a pure filter. MaxScore applies the boost to its bounds, results stay identical to exhaustive scoring.

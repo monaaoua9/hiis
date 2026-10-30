@@ -518,6 +518,11 @@ impl Segment {
         &self.docs[local as usize]
     }
 
+    /// Local number of a live document.
+    pub fn local_of(&self, id: DocId) -> Option<u32> {
+        self.by_ext.get(&id).copied().filter(|&l| !self.is_deleted(l))
+    }
+
     pub fn contains(&self, id: DocId) -> bool {
         self.by_ext.get(&id).is_some_and(|&l| !self.is_deleted(l))
     }

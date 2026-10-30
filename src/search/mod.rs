@@ -9,6 +9,7 @@
 //! so scores don't depend on how documents happen to be split into segments.
 
 pub mod bm25;
+pub mod explain;
 pub mod fuzzy;
 pub mod query;
 
