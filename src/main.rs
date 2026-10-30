@@ -1,7 +1,10 @@
 use std::fs;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
+use hiis::server::{Server, ServerConfig};
 use hiis::{Config, Engine, HighlightOpts, Result};
 
 const USAGE: &str = "\
@@ -16,6 +19,8 @@ usage:
   hiis merge  <dir>               merge all segments into one
   hiis verify <dir> [--deep]      check posting lists (and stored text with --deep)
   hiis backup <dir> <dest>        consistent copy of the committed index
+  hiis serve  <dir> [--addr HOST:PORT] [--threads N] [--commit-ms N] [--token T]
+                                  HTTP API; the token can also come from HIIS_TOKEN
   hiis stats  <dir>";
 
 fn main() -> ExitCode {
@@ -140,6 +145,26 @@ fn run(args: &[String]) -> Result<()> {
         ("backup", [dest]) => {
             engine.backup(dest)?;
             println!("backed up to {dest}");
+        }
+        ("serve", opts) => {
+            let mut cfg = ServerConfig { token: std::env::var("HIIS_TOKEN").ok(), ..Default::default() };
+            let mut it = opts.iter();
+            while let Some(flag) = it.next() {
+                let val = it.next().ok_or_else(bad_usage)?;
+                match flag.as_str() {
+                    "--addr" => cfg.addr = val.clone(),
+                    "--token" => cfg.token = Some(val.clone()),
+                    "--threads" => cfg.threads = val.parse().map_err(|_| bad_usage())?,
+                    "--commit-ms" => {
+                        let ms: u64 = val.parse().map_err(|_| bad_usage())?;
+                        cfg.commit_interval = (ms > 0).then(|| Duration::from_millis(ms));
+                    }
+                    _ => return Err(bad_usage()),
+                }
+            }
+            let server = Server::start(Arc::new(engine), cfg)?;
+            eprintln!("listening on http://{}", server.local_addr());
+            server.wait();
         }
         ("stats", []) => {
             let s = engine.stats();

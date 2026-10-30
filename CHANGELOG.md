@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* `hiis serve`: std-only HTTP/1.1 + JSON API (`/api/v1/documents`, `search` with cursor pagination and snippets, `suggest`, `similar`, `explain`, `commit`, `stats`). Keep-alive, thread pool, optional bearer token, background commit so writes show up without calling commit. Embeddable as `hiis::server::Server`.
 * Arabic: light stemmer (article/clitic prefixes, plural and pronoun suffixes; `AnalyzerConfig::arabic_stem`) and an Arabic stopword list. **Terms change for Arabic text, so re-index existing Arabic content.** Autocomplete offers words without their article.
 * `Engine::similar` / `hiis similar`: more-like-this. The document becomes a weighted OR query of its 25 highest tf-idf terms (terms nobody else has are ignored), run through the normal pruned search.
 * `Engine::search_page` with a text `Cursor`: next-k-after-this-hit pagination instead of offsets; pruning still applies. Pages concatenate to exactly the full ranking.
